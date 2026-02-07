@@ -1,6 +1,6 @@
 """Frame bar chart visualization."""
 
-from PyQt6.QtWidgets import QWidget, QScrollArea, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint
 from PyQt6.QtGui import QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon
 
@@ -120,26 +120,8 @@ class BarChartWidget(QWidget):
         self._draw_legend(painter, rect)
 
     def _draw_legend(self, painter: QPainter, rect: QRect) -> None:
-        """Draw frame type legend."""
-        legend_y = 5
-        legend_x = rect.width() - 150
-
-        painter.setPen(QColor(200, 200, 200))
-        font = painter.font()
-        font.setPointSize(8)
-        painter.setFont(font)
-
-        items = [
-            (FrameType.I, "I-frame"),
-            (FrameType.P, "P-frame"),
-            (FrameType.B, "B-frame"),
-        ]
-
-        for frame_type, label in items:
-            color = self.COLORS[frame_type]
-            painter.fillRect(legend_x, legend_y, 12, 12, color)
-            painter.drawText(legend_x + 16, legend_y + 10, label)
-            legend_x += 50
+        """Draw frame type legend (no-op, legend is a separate widget now)."""
+        pass
 
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse click to select frame."""
@@ -195,8 +177,39 @@ class BarChartWidget(QWidget):
         return self._selected_index
 
 
+class LegendWidget(QWidget):
+    """Fixed legend panel showing frame type colors."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(70)
+        self.setMinimumHeight(60)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(30, 30, 30))
+
+        painter.setPen(QColor(200, 200, 200))
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+
+        items = [
+            (BarChartWidget.COLORS[FrameType.I], "I-frame"),
+            (BarChartWidget.COLORS[FrameType.P], "P-frame"),
+            (BarChartWidget.COLORS[FrameType.B], "B-frame"),
+        ]
+
+        y = 8
+        for color, label in items:
+            painter.fillRect(6, y, 10, 10, color)
+            painter.drawText(20, y + 9, label)
+            y += 18
+
+
 class BarChartView(QWidget):
-    """Scrollable bar chart view for frame visualization."""
+    """Scrollable bar chart view with a fixed legend on the left."""
 
     frame_selected = pyqtSignal(int)
 
@@ -206,10 +219,15 @@ class BarChartView(QWidget):
 
     def _setup_ui(self):
         """Set up the UI layout."""
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # Scroll area
+        # Fixed legend on the left
+        self._legend = LegendWidget()
+        layout.addWidget(self._legend)
+
+        # Scroll area for the chart
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

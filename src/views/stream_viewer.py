@@ -1,7 +1,7 @@
 """NALU syntax tree viewer."""
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QLabel
+    QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QLabel, QHeaderView
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -40,9 +40,13 @@ class StreamViewer(QWidget):
         # Tree widget
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Element", "Value"])
-        self._tree.setColumnWidth(0, 250)
         self._tree.setAlternatingRowColors(True)
         self._tree.itemClicked.connect(self._on_item_clicked)
+
+        # Auto-resize columns to fit content
+        header = self._tree.header()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
 
         # Style
         self._tree.setStyleSheet("""

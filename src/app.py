@@ -3,9 +3,10 @@
 import os
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog, QMessageBox,
-    QApplication, QToolBar, QStatusBar, QProgressDialog
+    QApplication, QToolBar, QStatusBar, QProgressDialog,
+    QSpinBox, QLabel
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
 
 from .core.demuxer import Demuxer
@@ -51,6 +52,12 @@ class MainWindow(QMainWindow):
         self._decoder = Decoder()
         self._current_file = ""
 
+        # Playback state
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._on_play_tick)
+        self._is_playing = False
+        self._play_fps = 30
+
         self._setup_ui()
         self._setup_menus()
         self._setup_toolbar()
@@ -61,39 +68,47 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         """Set up the UI with dockable panels."""
+        # Allow nested docks for flexible side-by-side arrangements
+        self.setDockNestingEnabled(True)
+
         # Central widget - decoded frame view
         self._decoded_view = DecodedView()
         self.setCentralWidget(self._decoded_view)
+
+        all_areas = (Qt.DockWidgetArea.LeftDockWidgetArea |
+                     Qt.DockWidgetArea.RightDockWidgetArea |
+                     Qt.DockWidgetArea.TopDockWidgetArea |
+                     Qt.DockWidgetArea.BottomDockWidgetArea)
 
         # Left dock - Stream info
         self._stream_view = StreamView()
         stream_dock = QDockWidget("Stream Info", self)
         stream_dock.setWidget(self._stream_view)
-        stream_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        stream_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stream_dock)
 
         # Bottom dock - Bar chart
         self._barchart_view = BarChartView()
         barchart_dock = QDockWidget("Frame Chart", self)
         barchart_dock.setWidget(self._barchart_view)
-        barchart_dock.setAllowedAreas(Qt.DockWidgetArea.TopDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
+        barchart_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, barchart_dock)
 
         # Right dock - Stream viewer (NALU tree)
         self._stream_viewer = StreamViewer()
         viewer_dock = QDockWidget("NALU Viewer", self)
         viewer_dock.setWidget(self._stream_viewer)
-        viewer_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        viewer_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, viewer_dock)
 
-        # Right dock - Hex viewer (tabified with NALU viewer)
+        # Right dock - Hex viewer (split vertically below NALU viewer)
         self._hex_viewer = HexViewer()
         hex_dock = QDockWidget("Hex Viewer", self)
         hex_dock.setWidget(self._hex_viewer)
-        hex_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        hex_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, hex_dock)
-        self.tabifyDockWidget(viewer_dock, hex_dock)
-        viewer_dock.raise_()  # Show NALU viewer by default
+        # Place NALU and Hex side by side (vertically split) instead of tabbed
+        self.splitDockWidget(viewer_dock, hex_dock, Qt.Orientation.Vertical)
 
         # Status bar
         self._status_bar = QStatusBar()
@@ -107,6 +122,20 @@ class MainWindow(QMainWindow):
             'viewer': viewer_dock,
             'hex': hex_dock
         }
+
+        # Set initial dock proportions
+        # Left (stream) : Center : Right (NALU/Hex) roughly 1:3:2
+        self.resizeDocks(
+            [stream_dock, viewer_dock],
+            [240, 340],
+            Qt.Orientation.Horizontal
+        )
+        # Bottom bar chart height
+        self.resizeDocks(
+            [barchart_dock],
+            [150],
+            Qt.Orientation.Vertical
+        )
 
     def _setup_menus(self):
         """Set up menu bar."""
@@ -193,6 +222,18 @@ class MainWindow(QMainWindow):
         last_action.triggered.connect(lambda: self._select_frame(len(self._demuxer.frames) - 1))
         nav_menu.addAction(last_action)
 
+        nav_menu.addSeparator()
+
+        play_action = QAction("&Play / Pause", self)
+        play_action.setShortcut("Space")
+        play_action.triggered.connect(self._toggle_play)
+        nav_menu.addAction(play_action)
+
+        stop_action = QAction("&Stop", self)
+        stop_action.setShortcut("Escape")
+        stop_action.triggered.connect(self._stop_playback)
+        nav_menu.addAction(stop_action)
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
@@ -212,23 +253,48 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        prev_action = QAction("◀ Prev", self)
-        prev_action.triggered.connect(self._prev_frame)
-        toolbar.addAction(prev_action)
-
-        next_action = QAction("Next ▶", self)
-        next_action.triggered.connect(self._next_frame)
-        toolbar.addAction(next_action)
-
-        toolbar.addSeparator()
-
-        prev_key_action = QAction("◀◀ Prev Key", self)
+        prev_key_action = QAction("◀◀", self)
+        prev_key_action.setToolTip("Previous Keyframe (Shift+Left)")
         prev_key_action.triggered.connect(self._prev_keyframe)
         toolbar.addAction(prev_key_action)
 
-        next_key_action = QAction("Next Key ▶▶", self)
+        prev_action = QAction("◀", self)
+        prev_action.setToolTip("Previous Frame (Left)")
+        prev_action.triggered.connect(self._prev_frame)
+        toolbar.addAction(prev_action)
+
+        # Play/Pause/Stop
+        self._play_action = QAction("▶ Play", self)
+        self._play_action.setToolTip("Play (Space)")
+        self._play_action.triggered.connect(self._toggle_play)
+        toolbar.addAction(self._play_action)
+
+        self._stop_action = QAction("■ Stop", self)
+        self._stop_action.setToolTip("Stop (Escape)")
+        self._stop_action.triggered.connect(self._stop_playback)
+        toolbar.addAction(self._stop_action)
+
+        next_action = QAction("▶", self)
+        next_action.setToolTip("Next Frame (Right)")
+        next_action.triggered.connect(self._next_frame)
+        toolbar.addAction(next_action)
+
+        next_key_action = QAction("▶▶", self)
+        next_key_action.setToolTip("Next Keyframe (Shift+Right)")
         next_key_action.triggered.connect(self._next_keyframe)
         toolbar.addAction(next_key_action)
+
+        toolbar.addSeparator()
+
+        # FPS control
+        toolbar.addWidget(QLabel(" FPS: "))
+        self._fps_spin = QSpinBox()
+        self._fps_spin.setRange(1, 120)
+        self._fps_spin.setValue(self._play_fps)
+        self._fps_spin.setToolTip("Playback speed (frames per second)")
+        self._fps_spin.valueChanged.connect(self._on_fps_changed)
+        self._fps_spin.setFixedWidth(60)
+        toolbar.addWidget(self._fps_spin)
 
     def _setup_connections(self):
         """Set up signal connections between views."""
@@ -251,6 +317,9 @@ class MainWindow(QMainWindow):
 
     def _load_file(self, file_path: str):
         """Load a video file."""
+        # Stop any ongoing playback
+        self._pause_playback()
+
         self._status_bar.showMessage(f"Loading: {file_path}")
         QApplication.processEvents()
 
@@ -396,6 +465,55 @@ class MainWindow(QMainWindow):
                 self._select_frame(i)
                 return
 
+    # -- Playback controls --
+
+    def _toggle_play(self):
+        """Toggle play/pause."""
+        if self._is_playing:
+            self._pause_playback()
+        else:
+            self._start_playback()
+
+    def _start_playback(self):
+        """Start automatic frame playback."""
+        if not self._demuxer.is_open or not self._demuxer.frames:
+            return
+        self._is_playing = True
+        self._play_action.setText("⏸ Pause")
+        self._play_action.setToolTip("Pause (Space)")
+        interval = max(1, int(1000 / self._play_fps))
+        self._play_timer.start(interval)
+
+    def _pause_playback(self):
+        """Pause playback."""
+        self._is_playing = False
+        self._play_timer.stop()
+        self._play_action.setText("▶ Play")
+        self._play_action.setToolTip("Play (Space)")
+
+    def _stop_playback(self):
+        """Stop playback and return to first frame."""
+        self._pause_playback()
+        if self._demuxer.is_open and self._demuxer.frames:
+            self._select_frame(0)
+
+    def _on_play_tick(self):
+        """Advance to next frame during playback."""
+        current = self._barchart_view.selected_index
+        total = len(self._demuxer.frames)
+        if current < total - 1:
+            self._select_frame(current + 1)
+        else:
+            # Reached the end, stop
+            self._pause_playback()
+
+    def _on_fps_changed(self, value: int):
+        """Handle FPS spinbox change."""
+        self._play_fps = value
+        if self._is_playing:
+            interval = max(1, int(1000 / self._play_fps))
+            self._play_timer.setInterval(interval)
+
     def _show_about(self):
         """Show about dialog."""
         QMessageBox.about(
@@ -425,6 +543,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close."""
+        self._pause_playback()
         self._demuxer.close()
         self._decoder.close()
         event.accept()
