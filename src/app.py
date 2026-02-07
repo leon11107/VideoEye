@@ -149,6 +149,12 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._open_file_dialog)
         file_menu.addAction(open_action)
 
+        self._close_action = QAction("&Close", self)
+        self._close_action.setShortcut(QKeySequence("Ctrl+W"))
+        self._close_action.triggered.connect(self._close_file)
+        self._close_action.setEnabled(False)
+        file_menu.addAction(self._close_action)
+
         file_menu.addSeparator()
 
         exit_action = QAction("E&xit", self)
@@ -251,6 +257,11 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._open_file_dialog)
         toolbar.addAction(open_action)
 
+        close_action = QAction("Close", self)
+        close_action.setToolTip("Close file (Ctrl+W)")
+        close_action.triggered.connect(self._close_file)
+        toolbar.addAction(close_action)
+
         toolbar.addSeparator()
 
         prev_key_action = QAction("◀◀", self)
@@ -331,16 +342,11 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
-            # Open with demuxer
+            # Open with demuxer first (extracts frame list with keyframe info)
             if not self._demuxer.open(file_path):
                 progress.close()
                 QMessageBox.critical(self, "Error", "Failed to open video file")
                 return
-
-            # Open with decoder
-            if not self._decoder.open(file_path):
-                progress.close()
-                QMessageBox.warning(self, "Warning", "Failed to open decoder. Frame display will be unavailable.")
 
             self._current_file = file_path
 
@@ -361,6 +367,10 @@ class MainWindow(QMainWindow):
             # Refine frame types using NAL parsing
             self._refine_frame_types()
 
+            # Open decoder with frame list for keyframe-aware seeking
+            if not self._decoder.open(file_path, frames=self._demuxer.frames):
+                QMessageBox.warning(self, "Warning", "Failed to open decoder. Frame display will be unavailable.")
+
             # Update views
             self._stream_view.update_info(stream_info)
             self._barchart_view.set_frames(self._demuxer.frames)
@@ -369,10 +379,14 @@ class MainWindow(QMainWindow):
             if self._demuxer.frames:
                 self._select_frame(0)
 
+            self._close_action.setEnabled(True)
+
+            hw = self._decoder.hw_accel
+            hw_label = f" | Decode: {hw}" if hw != "software" else ""
             self._status_bar.showMessage(
                 f"Loaded: {os.path.basename(file_path)} | "
                 f"{stream_info.total_frames} frames | "
-                f"{stream_info.codec_name.upper()}"
+                f"{stream_info.codec_name.upper()}{hw_label}"
             )
 
         except Exception as e:
@@ -382,16 +396,47 @@ class MainWindow(QMainWindow):
         finally:
             progress.close()
 
+    def _close_file(self):
+        """Close current file and release all memory."""
+        self._pause_playback()
+
+        # Release decoder (drops frame cache)
+        self._decoder.close()
+
+        # Release demuxer (drops frame list + reader)
+        self._demuxer.close()
+
+        self._current_file = ""
+
+        # Clear all views
+        self._decoded_view.clear()
+        self._barchart_view.clear()
+        self._stream_viewer.clear()
+        self._hex_viewer.clear()
+        self._stream_view.clear()
+
+        self._close_action.setEnabled(False)
+
+        self.setWindowTitle("VideoEye - Video Analysis Tool")
+        self._status_bar.showMessage("File closed — memory released")
+
     def _refine_frame_types(self):
-        """Refine frame types by parsing NAL units."""
-        for frame in self._demuxer.frames:
-            if not frame.is_keyframe:
-                frame_type = self._stream_viewer.get_frame_type_from_nalus(frame.packet_data)
-                if frame_type != FrameType.UNKNOWN:
-                    frame.frame_type = frame_type
+        """Refine frame types via single-pass sequential read.
+
+        Only one packet's data is in memory at a time — the classifier
+        receives the bytes, classifies I/P/B, and the data is discarded.
+        """
+        self._demuxer.classify_frame_types(
+            self._stream_viewer.get_frame_type_from_nalus
+        )
 
     def _select_frame(self, index: int):
-        """Select and display a frame."""
+        """Select and display a frame.
+
+        During playback only the decoded view and barchart are updated
+        (NALU parsing + hex are skipped for speed). They refresh when
+        playback pauses.
+        """
         if not self._demuxer.is_open:
             return
 
@@ -410,16 +455,26 @@ class MainWindow(QMainWindow):
             if rgb_array is not None:
                 self._decoded_view.display_frame(rgb_array, index)
 
-        # Update stream viewer
-        self._stream_viewer.display_frame(frame)
-
-        # Update hex viewer
-        self._hex_viewer.set_data(frame.packet_data)
+        # During playback, skip expensive NALU/hex updates
+        if not self._is_playing:
+            self._update_analysis_views(frame)
 
         self._status_bar.showMessage(
             f"Frame {index} | {frame.frame_type.value}-frame | "
             f"{frame.size:,} bytes"
         )
+
+    def _update_analysis_views(self, frame: 'FrameInfo'):
+        """Load packet data on demand and update NALU & hex views."""
+        # Lazy-load packet data (only one packet in memory)
+        packet_data = self._demuxer.read_packet_data(frame.index)
+
+        # Temporarily set for stream_viewer which reads frame.packet_data
+        frame.packet_data = packet_data
+        self._stream_viewer.display_frame(frame)
+        self._hex_viewer.set_data(packet_data)
+        # Clear reference so it can be GC'd when no longer displayed
+        frame.packet_data = b''
 
     def _on_frame_selected(self, index: int):
         """Handle frame selection from bar chart."""
@@ -485,11 +540,18 @@ class MainWindow(QMainWindow):
         self._play_timer.start(interval)
 
     def _pause_playback(self):
-        """Pause playback."""
+        """Pause playback and refresh analysis views for current frame."""
+        was_playing = self._is_playing
         self._is_playing = False
         self._play_timer.stop()
         self._play_action.setText("▶ Play")
         self._play_action.setToolTip("Play (Space)")
+
+        # Refresh NALU/hex views that were skipped during playback
+        if was_playing and self._demuxer.is_open:
+            idx = self._barchart_view.selected_index
+            if 0 <= idx < len(self._demuxer.frames):
+                self._update_analysis_views(self._demuxer.frames[idx])
 
     def _stop_playback(self):
         """Stop playback and return to first frame."""
