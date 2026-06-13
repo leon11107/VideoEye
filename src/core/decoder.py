@@ -9,6 +9,7 @@ import numpy as np
 
 from .frame_info import FrameInfo
 from ..analysis import FrameAnalysis, create_extractor
+from ..analysis.block_sidecar import BlockSidecar
 
 
 class Decoder:
@@ -47,6 +48,8 @@ class Decoder:
         ] = OrderedDict()
         # Per-codec block analysis extractor (None if unsupported codec)
         self._extractor = None
+        # Patched-FFmpeg block-partition sidecar (None if helper unavailable)
+        self._block_sidecar: Optional[BlockSidecar] = None
         # Keyframe index for fast seek target lookup
         self._keyframe_indices: list[int] = []
         # frame_index -> seek timestamp (DTS preferred: av_seek_frame
@@ -105,6 +108,17 @@ class Decoder:
             except Exception:
                 pass
 
+            # Block-partition sidecar from patched FFmpeg (best-effort).
+            # Decodes the whole stream once at open; cached on disk so
+            # repeat opens are instant. Falls back silently if the helper
+            # binary is missing or the codec is unsupported.
+            try:
+                sidecar = BlockSidecar()
+                if sidecar.generate(file_path):
+                    self._block_sidecar = sidecar
+            except Exception as e:
+                print(f"Block sidecar unavailable: {e}")
+
             return True
 
         except Exception as e:
@@ -123,6 +137,7 @@ class Decoder:
         self._container = None
         self._video_stream = None
         self._extractor = None
+        self._block_sidecar = None
         self._decode_pos = -1
         self._frame_cache.clear()
         self._keyframe_indices.clear()
@@ -144,7 +159,19 @@ class Decoder:
     def get_analysis(self, frame_index: int) -> Optional[FrameAnalysis]:
         """Block-level analysis for a frame (decodes it if needed)."""
         entry = self._get_entry(frame_index)
-        return entry[1] if entry else None
+        if not entry:
+            return None
+        analysis = entry[1]
+        # Fill in block partitions from the sidecar on first access. The
+        # analysis object is shared with the cache, so this populates the
+        # cached entry too (no re-fetch on subsequent reads).
+        if (
+            analysis is not None
+            and analysis.blocks is None
+            and self._block_sidecar is not None
+        ):
+            analysis.blocks = self._block_sidecar.blocks_for(frame_index)
+        return analysis
 
     def _get_entry(
         self, frame_index: int

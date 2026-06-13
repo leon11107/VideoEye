@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 
+# Claude Code local settings
+.claude/
+
 # Generated test streams (regenerate with tests/gen_streams.ps1)
 tests/streams/
 
@@ -10,3 +13,7 @@ tools/smoke_out/
 
 # Local reference material (Elecard screenshots)
 reference/
+
+# Native helper build artifacts (built via native/build_probe.sh)
+native/veye_probe.exe
+native/*.dll

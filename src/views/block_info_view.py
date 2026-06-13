@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QGroupBox, QLabel, QVBoxLayout, QWidget
 )
 
+from ..analysis import PredType
 from .overlay import OVERLAYS
 
 
@@ -85,7 +86,15 @@ class BlockInfoView(QWidget):
         else:
             lines.append("MV:    none (intra frame or n/a)")
 
-        if analysis.blocks is None:
+        if analysis.blocks is not None and len(analysis.blocks) > 0:
+            b = analysis.blocks
+            n = len(b)
+            intra = int(np.count_nonzero(b["pred"] == PredType.INTRA))
+            inter = int(np.count_nonzero(b["pred"] == PredType.INTER))
+            skip = int(np.count_nonzero(b["pred"] == PredType.SKIP))
+            lines.append(f"Blocks: {n}  intra {intra} / inter {inter}"
+                         f" / skip {skip}")
+        else:
             lines.append("Partition/Types: pending patched-FFmpeg backend")
 
         self._stats_label.setText("\n".join(lines))
