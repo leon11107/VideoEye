@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Generated test streams (regenerate with tests/gen_streams.ps1)
+tests/streams/
+
+# Smoke test screenshots
+tools/smoke_out/
+
+# Local reference material (Elecard screenshots)
+reference/
