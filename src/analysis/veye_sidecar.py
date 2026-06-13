@@ -26,8 +26,17 @@ _ENTRY_HDR = struct.Struct("<II")  # frame_index, payload_size
 #                      u32 grid_w, u32 grid_h, u32 block_unit, u32 n_records
 _BLK_MAGIC = 0x4B424556  # bytes V E B K
 _BLK_HDR = struct.Struct("<IHHIIIII")
-# VeyeBlockRecord: u32 mb_type, i32 qp
+# VeyeBlockRecord (H.264): u32 mb_type, i32 qp
 _REC = np.dtype([("mb_type", "<u4"), ("qp", "<i4")])
+# VeyeBlockRecordHEVC: u8 cu_log2, u8 pred, u8 intra_mode, u8 reserved, i32 qp
+_REC_HEVC = np.dtype([
+    ("cu_log2", "u1"), ("pred", "u1"), ("intra_mode", "u1"),
+    ("reserved", "u1"), ("qp", "<i4"),
+])
+
+# codec_id values written into the header (AVCodecID, ABI-stable in practice).
+_CODEC_H264 = 27
+_CODEC_HEVC = 173
 
 # FFmpeg MB_TYPE_* bits (libavcodec/mpegutils.h) — ABI-stable.
 MB_TYPE_INTRA4x4 = 1 << 0
@@ -55,13 +64,21 @@ SHAPE_INTRA16, SHAPE_INTRA4, SHAPE_IPCM, SHAPE_SKIP, SHAPE_DIRECT = 4, 5, 6, 7, 
 
 @dataclass
 class VeyeFrameBlocks:
-    """Raw per-MB grid for one frame."""
+    """Raw per-cell grid for one frame.
+
+    H.264 cells are 16x16 macroblocks carrying an mb_type bitmask. HEVC
+    cells are min coding blocks (typically 8x8); the variable CU size and
+    prediction class live in the cu_log2/pred/intra_mode grids instead.
+    """
     codec_id: int
     grid_w: int
     grid_h: int
     block_unit: int
-    mb_type: np.ndarray  # uint32, shape (grid_h, grid_w)
-    qp: np.ndarray       # int32,  shape (grid_h, grid_w)
+    qp: np.ndarray                          # int32, shape (grid_h, grid_w)
+    mb_type: Optional[np.ndarray] = None    # H.264: uint32 grid
+    cu_log2: Optional[np.ndarray] = None    # HEVC: log2 CU size px
+    pred: Optional[np.ndarray] = None       # HEVC: PredType per cell
+    intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -101,15 +118,32 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         return None
     if n_records != grid_w * grid_h:
         return None
+
+    if codec_id == _CODEC_HEVC:
+        recs = np.frombuffer(payload, dtype=_REC_HEVC, count=n_records,
+                             offset=_BLK_HDR.size)
+        return VeyeFrameBlocks(
+            codec_id, grid_w, grid_h, block_unit,
+            qp=recs["qp"].reshape(grid_h, grid_w).copy(),
+            cu_log2=recs["cu_log2"].reshape(grid_h, grid_w).copy(),
+            pred=recs["pred"].reshape(grid_h, grid_w).copy(),
+            intra_mode=recs["intra_mode"].reshape(grid_h, grid_w).copy(),
+        )
+
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,
                          offset=_BLK_HDR.size)
-    mb_type = recs["mb_type"].reshape(grid_h, grid_w).copy()
-    qp = recs["qp"].reshape(grid_h, grid_w).copy()
-    return VeyeFrameBlocks(codec_id, grid_w, grid_h, block_unit, mb_type, qp)
+    return VeyeFrameBlocks(
+        codec_id, grid_w, grid_h, block_unit,
+        qp=recs["qp"].reshape(grid_h, grid_w).copy(),
+        mb_type=recs["mb_type"].reshape(grid_h, grid_w).copy(),
+    )
 
 
 def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
-    """Decode the mb_type grid into BLOCK_DTYPE partitions."""
+    """Decode a frame's per-cell grid into BLOCK_DTYPE partitions."""
+    if fb.codec_id == _CODEC_HEVC:
+        return _blocks_from_hevc(fb)
+
     unit = fb.block_unit
     out: list[tuple] = []
     mb = fb.mb_type
@@ -119,6 +153,34 @@ def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
             bx, by = mx * unit, my * unit
             for x, y, w, h, shape, pred in _partition(t, bx, by, unit):
                 out.append((x, y, w, h, 0, pred, shape))
+    arr = np.empty(len(out), dtype=BLOCK_DTYPE)
+    for i, rec in enumerate(out):
+        arr[i] = rec
+    return arr
+
+
+def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Collapse the min-CB grid back into the HEVC coding-unit quadtree.
+
+    Every min-CB cell carries the log2 size of the CU it belongs to. A CU
+    is aligned to its own size, so the cell at the CU's top-left corner is
+    the unique cell where both pixel coordinates are multiples of the CU
+    size; we emit one partition rectangle there. The mode field stores
+    cu_log2 for labeling.
+    """
+    unit = fb.block_unit
+    cu_log2 = fb.cu_log2
+    pred = fb.pred
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            cl = int(cu_log2[my, mx])
+            cu_px = 1 << cl
+            px = mx * unit
+            if px % cu_px or py % cu_px:
+                continue  # not the top-left cell of this CU
+            out.append((px, py, cu_px, cu_px, 0, int(pred[my, mx]), cl))
     arr = np.empty(len(out), dtype=BLOCK_DTYPE)
     for i, rec in enumerate(out):
         arr[i] = rec
