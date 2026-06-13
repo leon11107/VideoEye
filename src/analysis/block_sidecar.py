@@ -19,7 +19,13 @@ from typing import Optional
 
 import numpy as np
 
-from .veye_sidecar import VeyeFrameBlocks, blocks_from_frame, load_sidecar
+from .veye_sidecar import (
+    VeyeFrameBlocks,
+    blocks_from_frame,
+    load_sidecar,
+    mvs_from_frame,
+    qp_grid_from_frame,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROBE = _REPO_ROOT / "native" / "veye_probe.exe"
@@ -75,3 +81,30 @@ class BlockSidecar:
         if fb is None:
             return None
         return blocks_from_frame(fb)
+
+    def mvs_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """MV_DTYPE motion vectors for a frame, or None."""
+        if not self._frames:
+            return None
+        fb = self._frames.get(frame_index)
+        if fb is None:
+            return None
+        return mvs_from_frame(fb)
+
+    def qp_grid_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """QP grid (int16, -1 = unknown) for a frame, or None."""
+        if not self._frames:
+            return None
+        fb = self._frames.get(frame_index)
+        if fb is None:
+            return None
+        return qp_grid_from_frame(fb)
+
+    def block_unit_for(self, frame_index: int) -> Optional[int]:
+        """Pixels per QP/block grid cell for a frame, or None."""
+        if not self._frames:
+            return None
+        fb = self._frames.get(frame_index)
+        if fb is None:
+            return None
+        return fb.block_unit

@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import BLOCK_DTYPE, PredType
+from .schema import BLOCK_DTYPE, MV_DTYPE, PredType
 
 # Sidecar file header: u32 magic 'VEYE', u32 version, u32 n_frames
 _FILE_MAGIC = 0x45594556  # bytes V E Y E
@@ -28,11 +28,17 @@ _BLK_MAGIC = 0x4B424556  # bytes V E B K
 _BLK_HDR = struct.Struct("<IHHIIIII")
 # VeyeBlockRecord (H.264): u32 mb_type, i32 qp
 _REC = np.dtype([("mb_type", "<u4"), ("qp", "<i4")])
-# VeyeBlockRecordHEVC: u8 cu_log2, u8 pred, u8 intra_mode, u8 reserved, i32 qp
+# VeyeBlockRecordHEVC (sidecar v2): u8 cu_log2, u8 pred, u8 intra_mode,
+# u8 pred_flag, i32 qp, i16 mv0_x/y, i16 mv1_x/y, i8 ref0/ref1, u16 reserved.
 _REC_HEVC = np.dtype([
     ("cu_log2", "u1"), ("pred", "u1"), ("intra_mode", "u1"),
-    ("reserved", "u1"), ("qp", "<i4"),
+    ("pred_flag", "u1"), ("qp", "<i4"),
+    ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
+    ("ref0", "i1"), ("ref1", "i1"), ("reserved", "<u2"),
 ])
+
+# HEVC motion vectors are stored in quarter-pel luma units.
+_HEVC_MV_SCALE = 4.0
 
 # codec_id values written into the header (AVCodecID, ABI-stable in practice).
 _CODEC_H264 = 27
@@ -79,6 +85,9 @@ class VeyeFrameBlocks:
     cu_log2: Optional[np.ndarray] = None    # HEVC: log2 CU size px
     pred: Optional[np.ndarray] = None       # HEVC: PredType per cell
     intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
+    pred_flag: Optional[np.ndarray] = None  # HEVC: PredFlag (0/1/2/3 = I/L0/L1/BI)
+    mv: Optional[np.ndarray] = None         # HEVC: int16 grid (h, w, 2 lists, 2 xy)
+    ref_idx: Optional[np.ndarray] = None    # HEVC: int8 grid (h, w, 2 lists)
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -122,12 +131,22 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
     if codec_id == _CODEC_HEVC:
         recs = np.frombuffer(payload, dtype=_REC_HEVC, count=n_records,
                              offset=_BLK_HDR.size)
+        mv = np.empty((grid_h, grid_w, 2, 2), dtype=np.int16)
+        mv[..., 0, 0] = recs["mv0_x"].reshape(grid_h, grid_w)
+        mv[..., 0, 1] = recs["mv0_y"].reshape(grid_h, grid_w)
+        mv[..., 1, 0] = recs["mv1_x"].reshape(grid_h, grid_w)
+        mv[..., 1, 1] = recs["mv1_y"].reshape(grid_h, grid_w)
+        ref = np.empty((grid_h, grid_w, 2), dtype=np.int8)
+        ref[..., 0] = recs["ref0"].reshape(grid_h, grid_w)
+        ref[..., 1] = recs["ref1"].reshape(grid_h, grid_w)
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
             qp=recs["qp"].reshape(grid_h, grid_w).copy(),
             cu_log2=recs["cu_log2"].reshape(grid_h, grid_w).copy(),
             pred=recs["pred"].reshape(grid_h, grid_w).copy(),
             intra_mode=recs["intra_mode"].reshape(grid_h, grid_w).copy(),
+            pred_flag=recs["pred_flag"].reshape(grid_h, grid_w).copy(),
+            mv=mv, ref_idx=ref,
         )
 
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,
@@ -182,6 +201,71 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
                 continue  # not the top-left cell of this CU
             out.append((px, py, cu_px, cu_px, 0, int(pred[my, mx]), cl))
     arr = np.empty(len(out), dtype=BLOCK_DTYPE)
+    for i, rec in enumerate(out):
+        arr[i] = rec
+    return arr
+
+
+def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
+    """QP grid at block_unit-pixel granularity (int16, -1 = unknown)."""
+    if fb.qp is None:
+        return None
+    return fb.qp.astype(np.int16)
+
+
+def mvs_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Motion vectors (MV_DTYPE) for an HEVC frame, one per prediction region.
+
+    The motion field is sampled per min-CB. Cells are collapsed to their CU
+    when the whole CU shares one MvField (the 2Nx2N case); CUs whose sub-cells
+    differ (2NxN/Nx2N/NxN partitions) emit one vector per min-CB so the split
+    is preserved. Vectors are converted from quarter-pel to luma pixels.
+    """
+    if fb.codec_id != _CODEC_HEVC or fb.pred_flag is None or fb.mv is None:
+        return np.empty(0, dtype=MV_DTYPE)
+
+    unit = fb.block_unit
+    cu_log2 = fb.cu_log2
+    pf = fb.pred_flag
+    mv = fb.mv
+    out: list[tuple] = []
+
+    def emit(px, py, size, flag, m):
+        if flag & 1:
+            out.append((px, py, size, size, 0,
+                        m[0, 0] / _HEVC_MV_SCALE, m[0, 1] / _HEVC_MV_SCALE))
+        if flag & 2:
+            out.append((px, py, size, size, 1,
+                        m[1, 0] / _HEVC_MV_SCALE, m[1, 1] / _HEVC_MV_SCALE))
+
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            cl = int(cu_log2[my, mx])
+            cu_px = 1 << cl
+            px = mx * unit
+            if px % cu_px or py % cu_px:
+                continue  # not the CU's top-left cell
+            span = cu_px // unit
+            y1 = min(my + span, fb.grid_h)
+            x1 = min(mx + span, fb.grid_w)
+            sub_pf = pf[my:y1, mx:x1]
+            if not sub_pf.any():
+                continue  # intra CU, no motion
+            sub_mv = mv[my:y1, mx:x1]
+            uniform = (bool((sub_pf == sub_pf.flat[0]).all())
+                       and bool((sub_mv == sub_mv[0, 0]).all()))
+            if uniform:
+                emit(px, py, cu_px, int(sub_pf.flat[0]), sub_mv[0, 0])
+            else:
+                for dy in range(y1 - my):
+                    for dx in range(x1 - mx):
+                        f = int(sub_pf[dy, dx])
+                        if f:
+                            emit(px + dx * unit, py + dy * unit, unit,
+                                 f, sub_mv[dy, dx])
+
+    arr = np.empty(len(out), dtype=MV_DTYPE)
     for i, rec in enumerate(out):
         arr[i] = rec
     return arr

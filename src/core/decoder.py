@@ -162,15 +162,22 @@ class Decoder:
         if not entry:
             return None
         analysis = entry[1]
-        # Fill in block partitions from the sidecar on first access. The
-        # analysis object is shared with the cache, so this populates the
-        # cached entry too (no re-fetch on subsequent reads).
-        if (
-            analysis is not None
-            and analysis.blocks is None
-            and self._block_sidecar is not None
-        ):
-            analysis.blocks = self._block_sidecar.blocks_for(frame_index)
+        # Fill block-level fields from the sidecar on first access, only
+        # where the extractor left them unset (so mainline H.264 mv/qp are
+        # not overwritten). The analysis object is shared with the cache, so
+        # this populates the cached entry too (no re-fetch on later reads).
+        if analysis is not None and self._block_sidecar is not None:
+            if analysis.blocks is None:
+                analysis.blocks = self._block_sidecar.blocks_for(frame_index)
+            if analysis.mvs is None:
+                analysis.mvs = self._block_sidecar.mvs_for(frame_index)
+            if analysis.qp_grid is None:
+                grid = self._block_sidecar.qp_grid_for(frame_index)
+                if grid is not None:
+                    analysis.qp_grid = grid
+                    unit = self._block_sidecar.block_unit_for(frame_index)
+                    if unit:
+                        analysis.qp_unit = unit
         return analysis
 
     def _get_entry(
