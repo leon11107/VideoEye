@@ -114,7 +114,8 @@ class Decoder:
             # binary is missing or the codec is unsupported.
             try:
                 sidecar = BlockSidecar()
-                if sidecar.generate(file_path):
+                total = len(frames) if frames else None
+                if sidecar.generate(file_path, total_frames=total):
                     self._block_sidecar = sidecar
             except Exception as e:
                 print(f"Block sidecar unavailable: {e}")
@@ -137,6 +138,13 @@ class Decoder:
         self._container = None
         self._video_stream = None
         self._extractor = None
+        # Stop the background block-analysis helper and join its thread so a
+        # closed file never leaves an orphaned probe process running.
+        if self._block_sidecar is not None:
+            try:
+                self._block_sidecar.close()
+            except Exception:
+                pass
         self._block_sidecar = None
         self._decode_pos = -1
         self._frame_cache.clear()
@@ -179,6 +187,15 @@ class Decoder:
                     if unit:
                         analysis.qp_unit = unit
         return analysis
+
+    def analysis_progress(self) -> tuple[int, Optional[int], str]:
+        """Block-analysis generation progress: (ready, total, status).
+
+        status is one of 'unavailable', 'running', 'done', 'failed'.
+        """
+        if self._block_sidecar is None:
+            return (0, None, "unavailable")
+        return self._block_sidecar.progress()
 
     def _get_entry(
         self, frame_index: int

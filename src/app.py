@@ -59,6 +59,14 @@ class MainWindow(QMainWindow):
         self._is_playing = False
         self._play_fps = 30
 
+        # Background block-analysis progress polling
+        self._current_index = -1
+        self._analysis_timer = QTimer(self)
+        self._analysis_timer.setInterval(250)
+        self._analysis_timer.timeout.connect(self._on_analysis_tick)
+        self._last_ready = -1
+        self._analysis_finalized = False
+
         self._setup_ui()
         self._setup_menus()
         self._setup_toolbar()
@@ -123,6 +131,10 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
+        # Permanent widget for background block-analysis progress (kept
+        # separate from showMessage so frame status isn't clobbered).
+        self._analysis_label = QLabel("")
+        self._status_bar.addPermanentWidget(self._analysis_label)
 
         # Store dock references for menu
         self._docks = {
@@ -399,6 +411,13 @@ class MainWindow(QMainWindow):
             if self._demuxer.frames:
                 self._select_frame(0)
 
+            # Begin polling background block-analysis progress. The helper
+            # streams frames in decode order; overlays fill in as it advances.
+            self._last_ready = -1
+            self._analysis_finalized = False
+            self._analysis_label.setText("")
+            self._analysis_timer.start()
+
             self._close_action.setEnabled(True)
 
             hw = self._decoder.hw_accel
@@ -419,8 +438,11 @@ class MainWindow(QMainWindow):
     def _close_file(self):
         """Close current file and release all memory."""
         self._pause_playback()
+        self._analysis_timer.stop()
+        self._analysis_label.setText("")
+        self._current_index = -1
 
-        # Release decoder (drops frame cache)
+        # Release decoder (drops frame cache, stops the analysis helper)
         self._decoder.close()
 
         # Release demuxer (drops frame list + reader)
@@ -465,6 +487,7 @@ class MainWindow(QMainWindow):
         if not 0 <= index < len(frames):
             return
 
+        self._current_index = index
         frame = frames[index]
 
         # Update bar chart selection
@@ -592,6 +615,40 @@ class MainWindow(QMainWindow):
             # Reached the end, stop
             self._pause_playback()
 
+    def _on_analysis_tick(self):
+        """Poll background block-analysis progress and stream results in."""
+        ready, total, status = self._decoder.analysis_progress()
+
+        if status == "running":
+            self._analysis_label.setText(
+                f"Analyzing blocks: {ready}/{total}" if total
+                else f"Analyzing blocks: {ready}"
+            )
+        elif status == "done":
+            self._analysis_label.setText(f"Blocks ready: {ready}")
+        elif status == "failed":
+            self._analysis_label.setText("Block analysis unavailable")
+        else:  # unavailable
+            self._analysis_label.setText("")
+
+        terminal = status in ("done", "failed", "unavailable")
+
+        # Refresh the current frame's overlays/stats as data arrives. The
+        # analysis object is shared with the decoder cache and filled in place,
+        # so re-querying picks up newly decoded blocks for this frame.
+        if (not self._is_playing and self._current_index >= 0
+                and (ready != self._last_ready
+                     or (terminal and not self._analysis_finalized))):
+            analysis = self._decoder.get_analysis(self._current_index)
+            if analysis is not None:
+                self._decoded_view.refresh_overlays(analysis)
+                self._block_info_view.set_analysis(analysis)
+        self._last_ready = ready
+
+        if terminal:
+            self._analysis_finalized = True
+            self._analysis_timer.stop()
+
     def _on_fps_changed(self, value: int):
         """Handle FPS spinbox change."""
         self._play_fps = value
@@ -629,6 +686,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close."""
         self._pause_playback()
+        self._analysis_timer.stop()
         self._demuxer.close()
         self._decoder.close()
         event.accept()

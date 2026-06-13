@@ -96,6 +96,15 @@ class DecodedView(QWidget):
             self._compose()
             self._update_display()
 
+    def refresh_overlays(self, analysis=None) -> None:
+        """Recompose with (possibly newly filled) analysis, e.g. when the
+        block-analysis backend streams in data for the current frame."""
+        if analysis is not None:
+            self._analysis = analysis
+        if self._rgb is not None and any(self._overlay_flags.values()):
+            self._compose()
+            self._update_display()
+
     def _compose(self) -> None:
         """Build the native-resolution pixmap: frame + active overlays."""
         height, width, channels = self._rgb.shape

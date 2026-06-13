@@ -63,6 +63,15 @@ def scan(path):
             print("  FAIL decoder open")
             return
 
+        # Block analysis is now generated in a background thread; wait for it
+        # to finish so validation sees the complete per-frame data.
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            _ready, _total, status = decoder.analysis_progress()
+            if status != "running":
+                break
+            time.sleep(0.05)
+
         total = len(demuxer.frames)
         codec = demuxer.stream_info.codec_name
         # forward, backward seek, random seek, last frame

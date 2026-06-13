@@ -9,6 +9,7 @@ the overlays.
 
 from __future__ import annotations
 
+import os
 import struct
 from dataclasses import dataclass
 from typing import Optional
@@ -139,6 +140,72 @@ def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
         if fb is not None:
             frames[frame_index] = fb
     return frames
+
+
+FILE_HEADER_SIZE = _FILE_HDR.size
+
+
+def read_incremental(
+    path: str, offset: int, header_ok: bool
+) -> tuple[dict[int, VeyeFrameBlocks], int, bool]:
+    """Parse frame entries appended to a .veblk that is still being written.
+
+    Returns (new_frames, new_offset, header_ok). Only *complete* entries are
+    decoded: the helper writes the file as a single sequential append, so the
+    bytes on disk are always a valid prefix of the final stream, truncated at
+    some byte. We stop at the first entry whose header or payload is not fully
+    present yet and resume from there on the next call. The header's n_frames
+    field is ignored (it stays 0 until the helper finishes); we read to EOF.
+
+    `offset` is the number of bytes already consumed into complete entries
+    (FILE_HEADER_SIZE once the header is validated). All file access is
+    defensive: a missing file, a sharing violation, or a not-yet-written
+    header simply yields no new frames and is retried later.
+    """
+    frames: dict[int, VeyeFrameBlocks] = {}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return frames, offset, header_ok
+
+    if not header_ok:
+        if size < _FILE_HDR.size:
+            return frames, offset, False
+        try:
+            with open(path, "rb") as f:
+                hdr = f.read(_FILE_HDR.size)
+        except OSError:
+            return frames, offset, False
+        if len(hdr) < _FILE_HDR.size:
+            return frames, offset, False
+        magic, _ver, _n = _FILE_HDR.unpack(hdr)
+        if magic != _FILE_MAGIC:
+            return frames, offset, False
+        header_ok = True
+        offset = _FILE_HDR.size
+
+    if size <= offset:
+        return frames, offset, header_ok
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return frames, offset, header_ok
+
+    off, n = 0, len(data)
+    while off + _ENTRY_HDR.size <= n:
+        frame_index, payload_size = _ENTRY_HDR.unpack_from(data, off)
+        end = off + _ENTRY_HDR.size + payload_size
+        if end > n:
+            break  # payload not fully written yet
+        fb = _parse_payload(data[off + _ENTRY_HDR.size:end])
+        if fb is not None:
+            frames[frame_index] = fb
+        off = end
+
+    return frames, offset + off, header_ok
 
 
 def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
