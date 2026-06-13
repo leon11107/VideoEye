@@ -366,16 +366,31 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(f"Loading: {file_path}")
         QApplication.processEvents()
 
-        # Show progress dialog
-        progress = QProgressDialog("Loading video file...", None, 0, 0, self)
+        # Show progress dialog. The two open-time scans (frame indexing and
+        # I/P/B classification) drive it via on_progress for a real percentage
+        # instead of an indeterminate spinner.
+        progress = QProgressDialog("Indexing frames...", None, 0, 0, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(500)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
         progress.show()
         QApplication.processEvents()
 
+        def on_progress(stage: str, current: int, total: int) -> None:
+            progress.setLabelText(
+                "Indexing frames..." if stage == "index"
+                else "Classifying frame types..."
+            )
+            if total > 0:
+                progress.setMaximum(total)
+                progress.setValue(min(current, total))
+            else:
+                progress.setMaximum(0)  # unknown count: stay indeterminate
+            QApplication.processEvents()
+
         try:
             # Open with demuxer first (extracts frame list with keyframe info)
-            if not self._demuxer.open(file_path):
+            if not self._demuxer.open(file_path, progress_cb=on_progress):
                 progress.close()
                 QMessageBox.critical(self, "Error", "Failed to open video file")
                 return
@@ -397,7 +412,7 @@ class MainWindow(QMainWindow):
                 self._stream_viewer.set_extradata(extradata)
 
             # Refine frame types using NAL parsing
-            self._refine_frame_types()
+            self._refine_frame_types(on_progress)
 
             # Open decoder with frame list for keyframe-aware seeking
             if not self._decoder.open(file_path, frames=self._demuxer.frames):
@@ -463,14 +478,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VideoEye - Video Analysis Tool")
         self._status_bar.showMessage("File closed — memory released")
 
-    def _refine_frame_types(self):
+    def _refine_frame_types(self, progress_cb=None):
         """Refine frame types via single-pass sequential read.
 
         Only one packet's data is in memory at a time — the classifier
         receives the bytes, classifies I/P/B, and the data is discarded.
         """
         self._demuxer.classify_frame_types(
-            self._stream_viewer.get_frame_type_from_nalus
+            self._stream_viewer.get_frame_type_from_nalus,
+            progress_cb=progress_cb,
         )
 
     def _select_frame(self, index: int):

@@ -29,8 +29,14 @@ class Demuxer:
         self._reader_iter = None
         self._reader_pos: int = -1  # Last frame index read by reader
 
-    def open(self, file_path: str) -> bool:
-        """Open a video file for demuxing."""
+    def open(self, file_path: str,
+             progress_cb: Optional[Callable[[str, int, int], None]] = None) -> bool:
+        """Open a video file for demuxing.
+
+        progress_cb(stage, current, total) is called periodically during the
+        frame-indexing scan so the caller can drive a real progress bar.
+        total is 0 when the frame count is not known up front (raw streams).
+        """
         try:
             self.close()
             self._file_path = file_path
@@ -46,7 +52,7 @@ class Demuxer:
                 raise ValueError("No video stream found")
 
             self._extract_stream_info()
-            self._extract_frames()
+            self._extract_frames(progress_cb)
 
             # Open dedicated reader for on-demand packet access
             self._reader = av.open(file_path)
@@ -191,12 +197,19 @@ class Demuxer:
     # Single-pass frame type classification (memory-efficient)
     # ------------------------------------------------------------------ #
 
-    def classify_frame_types(self, classifier_fn: Callable[[bytes], FrameType]) -> None:
+    def classify_frame_types(
+        self,
+        classifier_fn: Callable[[bytes], FrameType],
+        progress_cb: Optional[Callable[[str, int, int], None]] = None,
+    ) -> None:
         """Refine frame types in a single sequential pass.
 
         Opens a temporary container, reads each packet once, passes
         its bytes to classifier_fn, and immediately discards the data.
         Only one packet is in memory at a time.
+
+        progress_cb(stage, current, total) is called periodically so the
+        caller can drive a real progress bar; total is the exact frame count.
         """
         try:
             tmp = av.open(self._file_path)
@@ -207,6 +220,7 @@ class Demuxer:
                 tmp.close()
                 return
 
+            total = len(self._frames)
             idx = 0
             for packet in tmp.demux(stream):
                 if packet.size == 0:  # flush packet
@@ -223,7 +237,11 @@ class Demuxer:
                     # packet_bytes goes out of scope immediately
 
                 idx += 1
+                if progress_cb is not None and (idx & 0x3F) == 0:
+                    progress_cb("classify", idx, total)
 
+            if progress_cb is not None:
+                progress_cb("classify", total, total)
             tmp.close()
         except Exception as e:
             print(f"Error classifying frame types: {e}")
@@ -332,7 +350,10 @@ class Demuxer:
 
         self._stream_info = info
 
-    def _extract_frames(self) -> None:
+    def _extract_frames(
+        self,
+        progress_cb: Optional[Callable[[str, int, int], None]] = None,
+    ) -> None:
         """Extract frame metadata without storing packet data.
 
         Only lightweight metadata (pts, dts, size, keyframe flag) is kept.
@@ -344,6 +365,9 @@ class Demuxer:
         self._frames = []
         stream = self._video_stream
         time_base = float(stream.time_base) if stream.time_base else 1.0
+        # Best-effort total for a determinate bar; 0 (unknown) for raw
+        # streams where the container reports no frame count.
+        total_est = stream.frames if stream.frames and stream.frames > 0 else 0
 
         # No seek here: the container is freshly opened (already at the
         # start), and a *failed* seek on unseekable input corrupts the
@@ -384,6 +408,11 @@ class Demuxer:
                 max_bitrate = max(max_bitrate, instant_bitrate)
 
             frame_index += 1
+            if progress_cb is not None and (frame_index & 0x3F) == 0:
+                progress_cb("index", frame_index, total_est)
+
+        if progress_cb is not None:
+            progress_cb("index", frame_index, frame_index)
 
         # Update stream info
         if self._stream_info:
