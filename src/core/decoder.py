@@ -50,11 +50,9 @@ class Decoder:
         self._extractor = None
         # Patched-FFmpeg block-partition sidecar (None if helper unavailable)
         self._block_sidecar: Optional[BlockSidecar] = None
-        # Keyframe index for fast seek target lookup
+        # Keyframe index (decode order) for nearest-keyframe lookup. Built by
+        # parsing the stream at open; never relies on container timestamps.
         self._keyframe_indices: list[int] = []
-        # frame_index -> seek timestamp (DTS preferred: av_seek_frame
-        # operates on DTS for most demuxers, e.g. mpegts)
-        self._frame_seek_ts: dict[int, int] = {}
         # Hardware accel info
         self._hw_accel: str = "software"
 
@@ -75,7 +73,6 @@ class Decoder:
                 self._keyframe_indices = sorted(
                     f.index for f in frames if f.is_keyframe
                 )
-                self._frame_seek_ts = self._build_seek_ts(frames)
 
             # Software decoding only: block-level side data (QP, MVs) is
             # produced by the software decoder, never by hwaccel paths.
@@ -149,15 +146,6 @@ class Decoder:
         self._decode_pos = -1
         self._frame_cache.clear()
         self._keyframe_indices.clear()
-        self._frame_seek_ts.clear()
-
-    @staticmethod
-    def _build_seek_ts(frames: list[FrameInfo]) -> dict[int, int]:
-        return {
-            f.index: (f.dts if f.dts is not None else f.pts)
-            for f in frames
-            if f.dts is not None or f.pts is not None
-        }
 
     def decode_frame(self, frame_index: int) -> Optional[np.ndarray]:
         """Decode a specific frame by index, returning RGB numpy array."""
@@ -238,9 +226,9 @@ class Decoder:
                 self._seek_to_keyframe(frame_index)
                 entry = self._decode_until(frame_index)
             if entry is None:
-                # Last resort: seeking is unreliable for this container
-                # (e.g. it landed past the only keyframe). Reopen and
-                # decode linearly from the start of the file.
+                # Last resort: decode linearly from the very start. Frame 0
+                # is always a correct anchor, so this guarantees the right
+                # frame even if the keyframe index or a GOP is malformed.
                 self._reopen()
                 self._decode_pos = -1
                 self._packet_iter = self._container.demux(self._video_stream)
@@ -253,42 +241,54 @@ class Decoder:
             return None
 
     def _seek_to_keyframe(self, target_index: int) -> None:
-        """Seek to the nearest keyframe at or before target_index."""
-        # Find nearest preceding keyframe using binary search
+        """Position the decoder at the nearest keyframe at or before target.
+
+        Never trusts container timestamps. The keyframe index is built by
+        parsing the whole stream at open, so we locate the keyframe by its
+        decode-order position and reach it by *parsing* (demux only, no
+        decode) — reopening first for a clean decoder so no stale reorder-
+        buffer frames leak across the jump. This is one uniform path for
+        container and raw elementary streams alike; raw demuxers cannot seek
+        at all, so forward parsing is the only correct way to reach a frame.
+        """
+        # Nearest preceding keyframe from the parsed index.
         if self._keyframe_indices:
             pos = bisect.bisect_right(self._keyframe_indices, target_index) - 1
             kf_index = self._keyframe_indices[max(0, pos)]
         else:
             kf_index = 0
 
-        # If we're already past this keyframe and before target, no need to seek
+        # Already positioned inside this GOP and before the target: keep
+        # decoding forward from here rather than reparsing from the start.
         if (
             self._packet_iter is not None
-            and self._decode_pos >= kf_index
-            and self._decode_pos < target_index
-            and target_index - self._decode_pos <= self.FORWARD_THRESHOLD
+            and kf_index <= self._decode_pos < target_index
         ):
             return
 
-        # Perform the seek using the keyframe's DTS (backward seek lands
-        # at the nearest packet with timestamp <= target)
-        ts = self._frame_seek_ts.get(kf_index)
-        try:
-            if ts is not None:
-                self._container.seek(ts, stream=self._video_stream)
-            else:
-                self._container.seek(0, stream=self._video_stream)
-                kf_index = 0
-        except Exception:
-            # Unseekable input (e.g. raw Annex-B elementary stream):
-            # reopen the container and decode from the start.
-            self._reopen()
-            kf_index = 0
-
-        # Reset decode cursor to just before the keyframe
-        self._decode_pos = kf_index - 1
-        # Create a fresh demux iterator from the seek position
+        # Reopen for a fresh decoder, then parse-skip to the keyframe packet.
+        self._reopen()
         self._packet_iter = self._container.demux(self._video_stream)
+        self._skip_packets_to(kf_index)
+        self._decode_pos = kf_index - 1
+
+    def _skip_packets_to(self, kf_index: int) -> None:
+        """Advance the demux iterator past the first kf_index packets without
+        decoding, so the next packet read is the keyframe.
+
+        Counts non-flush packets in demux order, matching the demuxer's frame
+        indexing. Reading packets only parses the bitstream (cheap); it never
+        decodes, so skipping thousands of frames costs no decode work.
+        """
+        if kf_index <= 0 or self._packet_iter is None:
+            return
+        count = 0
+        for packet in self._packet_iter:
+            if packet.size == 0:  # flush packet — not a coded frame
+                continue
+            count += 1
+            if count >= kf_index:
+                return
 
     def _reopen(self) -> None:
         """Reopen the container from scratch (fallback for unseekable input)."""
@@ -373,7 +373,6 @@ class Decoder:
         self._keyframe_indices = sorted(
             f.index for f in frames if f.is_keyframe
         )
-        self._frame_seek_ts = self._build_seek_ts(frames)
 
     @property
     def hw_accel(self) -> str:
