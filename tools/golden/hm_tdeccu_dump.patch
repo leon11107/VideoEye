@@ -1,0 +1,114 @@
+diff --git a/source/Lib/TLibDecoder/TDecCu.cpp b/source/Lib/TLibDecoder/TDecCu.cpp
+index 0d8d7d65..58893951 100644
+--- a/source/Lib/TLibDecoder/TDecCu.cpp
++++ b/source/Lib/TLibDecoder/TDecCu.cpp
+@@ -39,9 +39,101 @@
+ #include "TLibCommon/TComTU.h"
+ #include "TLibCommon/TComPrediction.h"
+ 
++#include <cstdlib>
++#include <cstdio>
++
+ //! \ingroup TLibDecoder
+ //! \{
+ 
++// VideoEye golden dump (non-upstream): when env VEYE_HM_DUMP names a file,
++// emit one CSV row per min-CB after each CTU is reconstructed. Fields mirror
++// the VideoEye sidecar's VeyeBlockRecordHEVC so a comparator can validate
++// the patched-FFmpeg output cell-for-cell. Disabled unless the env var is set.
++static FILE *g_veyeDump = NULL;
++
++static Void veyeDumpCtu(TComDataCU *pCtu)
++{
++  const char *path = getenv("VEYE_HM_DUMP");
++  if (!path)
++    return;
++  if (!g_veyeDump)
++  {
++    g_veyeDump = fopen(path, "w");
++    if (!g_veyeDump)
++      return;
++    fprintf(g_veyeDump,
++            "poc,x,y,cu_size,pred,intra_mode,qp,"
++            "mv0x,mv0y,ref0,mv1x,mv1y,ref1\n");
++  }
++
++  TComPic       *pcPic = pCtu->getPic();
++  const TComSPS &sps   = pcPic->getPicSym()->getSPS();
++  const Int      poc   = pCtu->getSlice()->getPOC();
++  const UInt     picW  = sps.getPicWidthInLumaSamples();
++  const UInt     picH  = sps.getPicHeightInLumaSamples();
++  const UInt     maxW  = sps.getMaxCUWidth();
++  const UInt     minCb = maxW >> sps.getLog2DiffMaxMinCodingBlockSize();
++  const UInt     partW = maxW >> 2;          // 4x4 parts per CTU row
++  const UInt     ctuX  = pCtu->getCUPelX();
++  const UInt     ctuY  = pCtu->getCUPelY();
++  const UInt     numParts = pCtu->getTotalNumPart();
++
++  const TComCUMvField *mf0 = pCtu->getCUMvField(REF_PIC_LIST_0);
++  const TComCUMvField *mf1 = pCtu->getCUMvField(REF_PIC_LIST_1);
++
++  for (UInt idx = 0; idx < numParts; )
++  {
++    const UInt depth     = pCtu->getDepth(idx);
++    const UInt cuSize     = maxW >> depth;
++    const UInt qNumParts  = numParts >> (depth << 1);
++    const UInt rs         = g_auiZscanToRaster[idx];
++    const UInt cuX        = ctuX + g_auiRasterToPelX[rs];
++    const UInt cuY        = ctuY + g_auiRasterToPelY[rs];
++
++    if (cuX < picW && cuY < picH)
++    {
++      Int pred;                              // 1 intra, 2 inter, 3 skip, 4 pcm
++      if      (pCtu->getIPCMFlag(idx)) pred = 4;
++      else if (pCtu->isSkipped(idx))   pred = 3;
++      else if (pCtu->isIntra(idx))     pred = 1;
++      else                             pred = 2;
++
++      const Int qp    = pCtu->getQP(idx);
++      const Int intra = pCtu->isIntra(idx)
++                          ? pCtu->getIntraDir(CHANNEL_TYPE_LUMA, idx) : 0;
++
++      for (UInt oy = 0; oy < cuSize; oy += minCb)
++      {
++        for (UInt ox = 0; ox < cuSize; ox += minCb)
++        {
++          const UInt mx = cuX + ox;
++          const UInt my = cuY + oy;
++          if (mx >= picW || my >= picH)
++            continue;
++          const UInt raster = ((my - ctuY) >> 2) * partW + ((mx - ctuX) >> 2);
++          const UInt cell   = g_auiRasterToZscan[raster];
++
++          Int mv0x = 0, mv0y = 0, ref0 = -1, mv1x = 0, mv1y = 0, ref1 = -1;
++          if (pred == 2 || pred == 3)
++          {
++            ref0 = mf0->getRefIdx(cell);
++            if (ref0 >= 0)
++            { const TComMv &m = mf0->getMv(cell); mv0x = m.getHor(); mv0y = m.getVer(); }
++            ref1 = mf1->getRefIdx(cell);
++            if (ref1 >= 0)
++            { const TComMv &m = mf1->getMv(cell); mv1x = m.getHor(); mv1y = m.getVer(); }
++          }
++
++          fprintf(g_veyeDump, "%d,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
++                  poc, mx, my, cuSize, pred, intra, qp,
++                  mv0x, mv0y, ref0, mv1x, mv1y, ref1);
++        }
++      }
++    }
++    idx += qNumParts;
++  }
++}
++
+ // ====================================================================================================================
+ // Constructor / destructor / create / destroy
+ // ====================================================================================================================
+@@ -162,6 +254,7 @@ Void TDecCu::decodeCtu( TComDataCU* pCtu, Bool& isLastCtuOfSliceSegment )
+ Void TDecCu::decompressCtu( TComDataCU* pCtu )
+ {
+   xDecompressCU( pCtu, 0,  0 );
++  veyeDumpCtu( pCtu );
+ }
+ 
+ // ====================================================================================================================
