@@ -17,3 +17,6 @@ reference/
 # Native helper build artifacts (built via native/build_probe.sh)
 native/veye_probe.exe
 native/*.dll
+
+# Raw decode dumps (test artifacts)
+*.yuv
