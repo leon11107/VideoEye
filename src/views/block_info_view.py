@@ -1,13 +1,20 @@
-"""Block Info panel: overlay toggles, per-frame stats, hovered-block details."""
+"""Block Info panel: overlay toggles, per-frame stats, and an Elecard-style
+hierarchical name|value table for the block under the cursor."""
 
 import numpy as np
 from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QGroupBox, QLabel, QVBoxLayout, QWidget
+    QCheckBox, QGroupBox, QLabel, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget
 )
 
-from ..analysis import PredType
+from ..analysis import PredType, block_type_label, qp_field_name
 from .overlay import OVERLAYS
+
+# Elecard-like section header coloring.
+_SECTION_BG = QColor("#2d5a88")
+_SECTION_FG = QColor("#ffffff")
 
 
 class BlockInfoView(QWidget):
@@ -41,15 +48,24 @@ class BlockInfoView(QWidget):
         stats_layout.addWidget(self._stats_label)
         layout.addWidget(stats_group)
 
-        hover_group = QGroupBox("Block at Cursor")
-        hover_layout = QVBoxLayout(hover_group)
-        self._hover_label = QLabel("Hover over the frame")
-        self._hover_label.setWordWrap(True)
-        self._hover_label.setStyleSheet("font-family: Consolas, monospace;")
-        hover_layout.addWidget(self._hover_label)
-        layout.addWidget(hover_group)
+        block_group = QGroupBox("Block Info")
+        block_layout = QVBoxLayout(block_group)
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(2)
+        self._tree.setHeaderLabels(["name", "value"])
+        self._tree.setRootIsDecorated(False)
+        self._tree.setIndentation(12)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget { font-family: Consolas, monospace; }"
+            "QTreeWidget::item { height: 18px; }"
+        )
+        self._tree.header().setStretchLastSection(True)
+        block_layout.addWidget(self._tree)
+        layout.addWidget(block_group, stretch=1)
 
-        layout.addStretch()
+        self._set_tree_placeholder("Hover over the frame")
 
     def _on_toggled(self):
         self.overlays_changed.emit(self.overlay_flags())
@@ -100,33 +116,86 @@ class BlockInfoView(QWidget):
         self._stats_label.setText("\n".join(lines))
 
     def set_hover(self, info) -> None:
-        """Update hovered-block details (info dict from DecodedView)."""
+        """Rebuild the block-info tree from a hover dict (or None)."""
+        self._tree.clear()
         if info is None:
-            self._hover_label.setText("Hover over the frame")
+            self._set_tree_placeholder("Hover over the frame")
             return
 
-        unit = info["unit"]
-        lines = [
-            f"Pixel: ({info['px']}, {info['py']})",
-            f"Block: ({info['block_x']}, {info['block_y']})"
-            f" @ {unit}x{unit}",
-            f"QP:    {info['qp'] if info['qp'] is not None else 'n/a'}",
-        ]
+        codec = info.get("codec", "")
+        block = info.get("block")
+        qp = info.get("qp")
         mvs = info.get("mvs")
-        if mvs is not None and len(mvs) > 0:
-            for mv in mvs[:6]:
-                lines.append(
-                    f"MV L{int(mv['list'])}: ({mv['mv_x']:+.2f}, {mv['mv_y']:+.2f})"
-                    f"  blk {int(mv['w'])}x{int(mv['h'])}"
-                    f" @({int(mv['x'])},{int(mv['y'])})"
-                )
-            if len(mvs) > 6:
-                lines.append(f"... +{len(mvs) - 6} more")
-        else:
-            lines.append("MV:    none")
+        unit = info["unit"]
 
-        self._hover_label.setText("\n".join(lines))
+        loc = self._section("Location")
+        self._row(loc, "pixel", f"({info['px']}, {info['py']})")
+        self._row(loc, "block", f"({info['block_x']}, {info['block_y']})")
+        self._row(loc, "unit", f"{unit}x{unit}")
+
+        cu = self._section("Coded Unit")
+        if block is not None:
+            self._row(cu, "type", block_type_label(codec, int(block["mode"])))
+            self._row(cu, "dimensions", f"{int(block['w'])}x{int(block['h'])}")
+            self._row(cu, "prediction",
+                      PredType.NAMES.get(int(block["pred"]), "?"))
+            if codec == "hevc":
+                self._row(cu, "depth", str(int(block["depth"])))
+        else:
+            self._row(cu, "type", "n/a (no partition data)")
+
+        tu = self._section("Transform Unit")
+        self._row(tu, qp_field_name(codec),
+                  str(qp) if qp is not None else "n/a")
+
+        pu = self._section("Prediction Unit")
+        if mvs is not None and len(mvs) > 0:
+            has_l0 = bool(np.any(mvs["list"] == 0))
+            has_l1 = bool(np.any(mvs["list"] == 1))
+            inter = ("Pred_BI" if has_l0 and has_l1
+                     else "Pred_L0" if has_l0 else "Pred_L1")
+            self._row(pu, "inter type", inter)
+            for mv in mvs[:6]:
+                self._row(pu, f"L{int(mv['list'])} mv",
+                          f"({mv['mv_x']:+.2f}, {mv['mv_y']:+.2f})")
+            if len(mvs) > 6:
+                self._row(pu, "...", f"+{len(mvs) - 6} more")
+        else:
+            self._row(pu, "inter type", "intra / none")
+
+        self._tree.expandAll()
 
     def clear(self) -> None:
         self._stats_label.setText("No analysis data")
-        self._hover_label.setText("Hover over the frame")
+        self._tree.clear()
+        self._set_tree_placeholder("Hover over the frame")
+
+    # -- tree helpers -----------------------------------------------------
+
+    def _section(self, title: str) -> QTreeWidgetItem:
+        item = QTreeWidgetItem(self._tree, [title, ""])
+        font = item.font(0)
+        font.setBold(True)
+        for col in (0, 1):
+            item.setBackground(col, QBrush(_SECTION_BG))
+            item.setForeground(col, QBrush(_SECTION_FG))
+            item.setFont(col, font)
+        return item
+
+    def _row(self, parent: QTreeWidgetItem, name: str, value: str) -> None:
+        QTreeWidgetItem(parent, [name, value])
+
+    def _set_tree_placeholder(self, text: str) -> None:
+        item = QTreeWidgetItem(self._tree, [text, ""])
+        item.setForeground(0, QBrush(QColor("#888888")))
+
+    def _hover_text(self) -> str:
+        """Flatten the block-info tree to text (for headless smoke tests)."""
+        lines = []
+        for i in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(i)
+            lines.append(top.text(0))
+            for j in range(top.childCount()):
+                child = top.child(j)
+                lines.append(f"  {child.text(0)}: {child.text(1)}")
+        return "\n".join(lines)

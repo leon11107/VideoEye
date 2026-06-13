@@ -101,3 +101,22 @@ class FrameAnalysis:
             & (m["y"] <= py) & (py < m["y"] + m["h"])
         )
         return m[mask]
+
+    def block_at(self, px: int, py: int):
+        """Coding block (BLOCK_DTYPE record) covering pixel (px, py), or None.
+
+        When partitions nest, the smallest covering block wins so the most
+        specific sub-partition is reported.
+        """
+        if self.blocks is None or len(self.blocks) == 0 or px < 0 or py < 0:
+            return None
+        b = self.blocks
+        mask = (
+            (b["x"] <= px) & (px < b["x"] + b["w"])
+            & (b["y"] <= py) & (py < b["y"] + b["h"])
+        )
+        hits = b[mask]
+        if len(hits) == 0:
+            return None
+        areas = hits["w"].astype(np.int32) * hits["h"].astype(np.int32)
+        return hits[int(np.argmin(areas))]

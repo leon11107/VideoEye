@@ -137,6 +137,7 @@ class DecodedView(QWidget):
 
         a = self._analysis
         info = {
+            "codec": a.codec,
             "px": px,
             "py": py,
             "unit": a.qp_unit,
@@ -144,6 +145,7 @@ class DecodedView(QWidget):
             "block_y": py // a.qp_unit,
             "qp": a.qp_at(px, py),
             "mvs": a.mvs_at(px, py),
+            "block": a.block_at(px, py),
         }
         self.block_hovered.emit(info)
 

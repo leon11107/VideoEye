@@ -52,7 +52,7 @@ if shown:
 print("=== Frame Statistics ===")
 print(win._block_info_view._stats_label.text())
 print("=== Block at Cursor ===")
-print(win._block_info_view._hover_label.text())
+print(win._block_info_view._hover_text())
 
 # Quick sanity over several frames including seeks
 for idx in (0, 5, 1, 30, 10, 59):

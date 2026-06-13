@@ -2,6 +2,7 @@
 
 from .schema import FrameAnalysis, PredType, MV_DTYPE, BLOCK_DTYPE
 from .extractor import CodecExtractor, create_extractor, register
+from .labels import block_type_label, qp_field_name
 
 # Import codec modules so their @register decorators run.
 from . import h264  # noqa: F401
@@ -11,4 +12,5 @@ from . import av1  # noqa: F401
 __all__ = [
     "FrameAnalysis", "PredType", "MV_DTYPE", "BLOCK_DTYPE",
     "CodecExtractor", "create_extractor", "register",
+    "block_type_label", "qp_field_name",
 ]
