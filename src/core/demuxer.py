@@ -117,7 +117,7 @@ class Demuxer:
         """Read the next packet from the active iterator."""
         try:
             for packet in self._reader_iter:
-                if packet.dts is None and packet.pts is None:
+                if packet.size == 0:  # flush packet
                     continue
                 self._reader_pos = frame_index
                 return bytes(packet)
@@ -127,26 +127,59 @@ class Demuxer:
         return self._reader_seek_and_read(frame_index, frame)
 
     def _reader_seek_and_read(self, frame_index: int, frame: FrameInfo) -> bytes:
-        """Seek to the frame's PTS and read the matching packet."""
-        try:
-            target_pts = frame.pts
-            if target_pts is not None:
-                self._reader.seek(target_pts, stream=self._reader_stream)
-            else:
-                self._reader.seek(0, stream=self._reader_stream)
+        """Seek near the frame and read the matching packet.
 
+        Seeks and matches by DTS (monotonic in stream order; av_seek_frame
+        is DTS-based for most demuxers). Streams without any timestamps
+        (raw elementary streams) fall back to an ordinal scan.
+        """
+        use_dts = frame.dts is not None
+        seek_ts = frame.dts if use_dts else frame.pts
+        if seek_ts is None:
+            return self._reader_ordinal_scan(frame_index)
+
+        try:
+            self._reader.seek(seek_ts, stream=self._reader_stream)
             self._reader_iter = self._reader.demux(self._reader_stream)
 
             for packet in self._reader_iter:
-                if packet.dts is None and packet.pts is None:
+                if packet.size == 0:
                     continue
-                if packet.pts == target_pts:
+                ts = packet.dts if use_dts else packet.pts
+                if ts == seek_ts:
                     self._reader_pos = frame_index
                     return bytes(packet)
                 # Went past target — stop
-                if (packet.pts is not None and target_pts is not None
-                        and packet.pts > target_pts):
+                if ts is not None and ts > seek_ts:
                     break
+        except Exception as e:
+            print(f"Error reading packet for frame {frame_index}: {e}")
+
+        self._reader_iter = None
+        self._reader_pos = -1
+        return b''
+
+    def _reader_ordinal_scan(self, frame_index: int) -> bytes:
+        """Reopen the reader and scan to the Nth packet (unseekable input)."""
+        try:
+            if self._reader:
+                self._reader.close()
+        except Exception:
+            pass
+        try:
+            self._reader = av.open(self._file_path)
+            self._reader_stream = next(
+                (s for s in self._reader.streams if s.type == 'video'), None
+            )
+            self._reader_iter = self._reader.demux(self._reader_stream)
+            idx = -1
+            for packet in self._reader_iter:
+                if packet.size == 0:
+                    continue
+                idx += 1
+                if idx == frame_index:
+                    self._reader_pos = frame_index
+                    return bytes(packet)
         except Exception as e:
             print(f"Error reading packet for frame {frame_index}: {e}")
 
@@ -176,7 +209,7 @@ class Demuxer:
 
             idx = 0
             for packet in tmp.demux(stream):
-                if packet.dts is None and packet.pts is None:
+                if packet.size == 0:  # flush packet
                     continue
                 if idx >= len(self._frames):
                     break
@@ -312,16 +345,16 @@ class Demuxer:
         stream = self._video_stream
         time_base = float(stream.time_base) if stream.time_base else 1.0
 
-        # Reset to beginning
-        self._container.seek(0)
-
+        # No seek here: the container is freshly opened (already at the
+        # start), and a *failed* seek on unseekable input corrupts the
+        # demuxer state so it yields almost no packets afterwards.
         frame_index = 0
         keyframe_count = 0
         max_bitrate = 0
         total_bytes = 0
 
         for packet in self._container.demux(stream):
-            if packet.dts is None and packet.pts is None:
+            if packet.size == 0:  # flush packet
                 continue
 
             is_key = packet.is_keyframe
@@ -340,7 +373,7 @@ class Demuxer:
                 is_keyframe=is_key,
                 frame_type=frame_type,
                 # packet_data intentionally left empty (lazy loaded)
-                time_seconds=packet.pts * time_base if packet.pts else 0.0
+                time_seconds=packet.pts * time_base if packet.pts is not None else 0.0
             )
 
             self._frames.append(frame)

@@ -17,6 +17,7 @@ from .views.barchart_view import BarChartView
 from .views.decoded_view import DecodedView
 from .views.stream_viewer import StreamViewer
 from .views.hex_viewer import HexViewer
+from .views.block_info_view import BlockInfoView
 
 
 class LoadWorker(QThread):
@@ -87,6 +88,14 @@ class MainWindow(QMainWindow):
         stream_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stream_dock)
 
+        # Left dock - Block info (overlay toggles + block statistics)
+        self._block_info_view = BlockInfoView()
+        block_dock = QDockWidget("Block Info", self)
+        block_dock.setWidget(self._block_info_view)
+        block_dock.setAllowedAreas(all_areas)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, block_dock)
+        self.splitDockWidget(stream_dock, block_dock, Qt.Orientation.Vertical)
+
         # Bottom dock - Bar chart
         self._barchart_view = BarChartView()
         barchart_dock = QDockWidget("Frame Chart", self)
@@ -118,6 +127,7 @@ class MainWindow(QMainWindow):
         # Store dock references for menu
         self._docks = {
             'stream': stream_dock,
+            'blockinfo': block_dock,
             'barchart': barchart_dock,
             'viewer': viewer_dock,
             'hex': hex_dock
@@ -315,6 +325,16 @@ class MainWindow(QMainWindow):
         # Stream viewer NALU selection -> hex viewer highlight
         self._stream_viewer.nalu_selected.connect(self._on_nalu_selected)
 
+        # Block info overlay toggles -> decoded view layers
+        self._block_info_view.overlays_changed.connect(
+            self._decoded_view.set_overlays
+        )
+
+        # Hovered block in decoded view -> block info panel
+        self._decoded_view.block_hovered.connect(
+            self._block_info_view.set_hover
+        )
+
     def _open_file_dialog(self):
         """Open file dialog to select video."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -414,6 +434,7 @@ class MainWindow(QMainWindow):
         self._stream_viewer.clear()
         self._hex_viewer.clear()
         self._stream_view.clear()
+        self._block_info_view.clear()
 
         self._close_action.setEnabled(False)
 
@@ -449,11 +470,13 @@ class MainWindow(QMainWindow):
         # Update bar chart selection
         self._barchart_view.select_frame(index)
 
-        # Decode and display frame
+        # Decode and display frame (with block analysis from same pass)
         if self._decoder.is_open:
             rgb_array = self._decoder.decode_frame(index)
             if rgb_array is not None:
-                self._decoded_view.display_frame(rgb_array, index)
+                analysis = self._decoder.get_analysis(index)
+                self._decoded_view.display_frame(rgb_array, index, analysis)
+                self._block_info_view.set_analysis(analysis)
 
         # During playback, skip expensive NALU/hex updates
         if not self._is_playing:

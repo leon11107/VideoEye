@@ -1,0 +1,98 @@
+"""Codec-agnostic per-frame block analysis data model.
+
+All analyzer backends (stock FFmpeg side data, patched FFmpeg, etc.)
+normalize their output into FrameAnalysis so views never see codec
+specifics. Adding a codec or a new coding tool must not change this
+module's consumers.
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+# Normalized motion vector record. Positions are luma pixels in the
+# decoded frame; mv_x/mv_y are in pixels (fractional pel resolved).
+MV_DTYPE = np.dtype([
+    ("x", np.int16),
+    ("y", np.int16),
+    ("w", np.uint8),
+    ("h", np.uint8),
+    ("list", np.uint8),     # 0 = L0 (past ref), 1 = L1 (future ref)
+    ("mv_x", np.float32),
+    ("mv_y", np.float32),
+])
+
+# Normalized coding block record (partition + prediction type).
+BLOCK_DTYPE = np.dtype([
+    ("x", np.int16),
+    ("y", np.int16),
+    ("w", np.uint8),
+    ("h", np.uint8),
+    ("depth", np.uint8),
+    ("pred", np.uint8),     # PredType
+    ("mode", np.int16),     # codec-specific mode id (label via extension)
+])
+
+
+class PredType:
+    UNKNOWN = 0
+    INTRA = 1
+    INTER = 2
+    SKIP = 3
+    IPCM = 4
+
+    NAMES = {0: "?", 1: "Intra", 2: "Inter", 3: "Skip", 4: "IPCM"}
+
+
+@dataclass
+class FrameAnalysis:
+    """Per-frame block-level analysis in a codec-agnostic form."""
+
+    frame_index: int
+    codec: str
+    width: int
+    height: int
+    pict_type: str = "?"
+
+    # QP grid at qp_unit-pixel granularity; int16, -1 = unknown.
+    qp_unit: int = 16
+    qp_grid: Optional[np.ndarray] = None
+
+    # Motion vectors (MV_DTYPE) and coding blocks (BLOCK_DTYPE).
+    mvs: Optional[np.ndarray] = None
+    blocks: Optional[np.ndarray] = None
+
+    # Future codec features attach here as named chunks (e.g. "sao",
+    # "alf", "cdef") without touching this schema.
+    extensions: dict = field(default_factory=dict)
+
+    def qp_stats(self) -> Optional[tuple[int, int, float]]:
+        """(min, max, mean) of known QP values, or None."""
+        if self.qp_grid is None:
+            return None
+        valid = self.qp_grid[self.qp_grid >= 0]
+        if valid.size == 0:
+            return None
+        return int(valid.min()), int(valid.max()), float(valid.mean())
+
+    def qp_at(self, px: int, py: int) -> Optional[int]:
+        """QP of the block covering pixel (px, py), or None."""
+        if self.qp_grid is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if row >= self.qp_grid.shape[0] or col >= self.qp_grid.shape[1]:
+            return None
+        qp = int(self.qp_grid[row, col])
+        return qp if qp >= 0 else None
+
+    def mvs_at(self, px: int, py: int) -> np.ndarray:
+        """Motion vectors whose block covers pixel (px, py)."""
+        if self.mvs is None:
+            return np.empty(0, dtype=MV_DTYPE)
+        m = self.mvs
+        mask = (
+            (m["x"] <= px) & (px < m["x"] + m["w"])
+            & (m["y"] <= py) & (py < m["y"] + m["h"])
+        )
+        return m[mask]

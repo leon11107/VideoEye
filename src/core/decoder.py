@@ -8,10 +8,15 @@ import av
 import numpy as np
 
 from .frame_info import FrameInfo
+from ..analysis import FrameAnalysis, create_extractor
 
 
 class Decoder:
     """Decodes video frames to RGB images with smart seeking and LRU cache.
+
+    A single decode pass produces both the RGB image and the block-level
+    FrameAnalysis (QP/MV/...) via the codec's registered extractor, so
+    analysis adds no extra decoding cost.
 
     Performance optimizations over naive decode:
     1. Smart seeking: seeks to nearest keyframe before target, not to frame 0
@@ -36,12 +41,17 @@ class Decoder:
         self._decode_pos: int = -1
         # Active demux iterator (kept alive for sequential access)
         self._packet_iter = None
-        # LRU cache: frame_index -> rgb numpy array
-        self._frame_cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        # LRU cache: frame_index -> (rgb array, FrameAnalysis or None)
+        self._frame_cache: OrderedDict[
+            int, tuple[np.ndarray, Optional[FrameAnalysis]]
+        ] = OrderedDict()
+        # Per-codec block analysis extractor (None if unsupported codec)
+        self._extractor = None
         # Keyframe index for fast seek target lookup
         self._keyframe_indices: list[int] = []
-        # frame_index -> PTS mapping for seeking
-        self._frame_pts: dict[int, int] = {}
+        # frame_index -> seek timestamp (DTS preferred: av_seek_frame
+        # operates on DTS for most demuxers, e.g. mpegts)
+        self._frame_seek_ts: dict[int, int] = {}
         # Hardware accel info
         self._hw_accel: str = "software"
 
@@ -62,16 +72,32 @@ class Decoder:
                 self._keyframe_indices = sorted(
                     f.index for f in frames if f.is_keyframe
                 )
-                self._frame_pts = {
-                    f.index: f.pts for f in frames if f.pts is not None
-                }
+                self._frame_seek_ts = self._build_seek_ts(frames)
 
-            # Try to open with hardware acceleration, fall back to software
-            if not self._try_open_hw(file_path):
-                self._open_sw(file_path)
+            # Software decoding only: block-level side data (QP, MVs) is
+            # produced by the software decoder, never by hwaccel paths.
+            self._container = av.open(file_path)
+            self._video_stream = next(
+                (s for s in self._container.streams if s.type == "video"),
+                None,
+            )
+            self._hw_accel = "software"
 
             if not self._video_stream:
                 raise ValueError("No video stream found")
+
+            # Configure block analysis extraction for this codec.
+            # Codec options must be set before the decoder opens.
+            codec_ctx = self._video_stream.codec_context
+            self._extractor = create_extractor(codec_ctx.name)
+            if self._extractor:
+                try:
+                    options = dict(codec_ctx.options or {})
+                    options.update(self._extractor.decoder_options())
+                    codec_ctx.options = options
+                except Exception as e:
+                    print(f"Failed to enable analysis side data: {e}")
+                    self._extractor = None
 
             # Enable multi-threaded decoding
             try:
@@ -86,48 +112,6 @@ class Decoder:
             self.close()
             return False
 
-    def _try_open_hw(self, file_path: str) -> bool:
-        """Try to open with hardware-accelerated decoding."""
-        # Try D3D11VA (Windows), then CUDA, then VAAPI (Linux)
-        hw_options = ["d3d11va", "cuda", "vaapi"]
-        for hw in hw_options:
-            try:
-                self._container = av.open(file_path, options={"hwaccel": hw})
-                self._video_stream = next(
-                    (s for s in self._container.streams if s.type == "video"),
-                    None,
-                )
-                if self._video_stream:
-                    self._hw_accel = hw
-                    # Verify it actually works by decoding a test frame
-                    self._container.seek(0, stream=self._video_stream)
-                    for packet in self._container.demux(self._video_stream):
-                        for frame in packet.decode():
-                            _ = frame.to_ndarray(format="rgb24")
-                            # Success - re-seek to beginning for clean state
-                            self._container.seek(0, stream=self._video_stream)
-                            self._decode_pos = -1
-                            self._packet_iter = None
-                            return True
-                self._container.close()
-            except Exception:
-                if self._container:
-                    try:
-                        self._container.close()
-                    except Exception:
-                        pass
-                self._container = None
-                self._video_stream = None
-        return False
-
-    def _open_sw(self, file_path: str) -> None:
-        """Open with software decoding."""
-        self._container = av.open(file_path)
-        self._video_stream = next(
-            (s for s in self._container.streams if s.type == "video"), None
-        )
-        self._hw_accel = "software"
-
     def close(self) -> None:
         """Close the decoder and release resources."""
         self._packet_iter = None
@@ -138,13 +122,34 @@ class Decoder:
                 pass
         self._container = None
         self._video_stream = None
+        self._extractor = None
         self._decode_pos = -1
         self._frame_cache.clear()
         self._keyframe_indices.clear()
-        self._frame_pts.clear()
+        self._frame_seek_ts.clear()
+
+    @staticmethod
+    def _build_seek_ts(frames: list[FrameInfo]) -> dict[int, int]:
+        return {
+            f.index: (f.dts if f.dts is not None else f.pts)
+            for f in frames
+            if f.dts is not None or f.pts is not None
+        }
 
     def decode_frame(self, frame_index: int) -> Optional[np.ndarray]:
-        """Decode a specific frame by index, returning RGB numpy array.
+        """Decode a specific frame by index, returning RGB numpy array."""
+        entry = self._get_entry(frame_index)
+        return entry[0] if entry else None
+
+    def get_analysis(self, frame_index: int) -> Optional[FrameAnalysis]:
+        """Block-level analysis for a frame (decodes it if needed)."""
+        entry = self._get_entry(frame_index)
+        return entry[1] if entry else None
+
+    def _get_entry(
+        self, frame_index: int
+    ) -> Optional[tuple[np.ndarray, Optional[FrameAnalysis]]]:
+        """Decode a specific frame by index, returning (rgb, analysis).
 
         Uses smart seeking and caching for performance:
         - Cached frames are returned immediately.
@@ -173,7 +178,23 @@ class Decoder:
                 self._seek_to_keyframe(frame_index)
 
             # 4. Decode forward to the target frame
-            return self._decode_until(frame_index)
+            entry = self._decode_until(frame_index)
+            if entry is None:
+                # Retry once from a fresh seek. Handles iterators that
+                # hit EOF (e.g. the target was flushed out in a batch
+                # while serving an earlier frame).
+                self._packet_iter = None
+                self._seek_to_keyframe(frame_index)
+                entry = self._decode_until(frame_index)
+            if entry is None:
+                # Last resort: seeking is unreliable for this container
+                # (e.g. it landed past the only keyframe). Reopen and
+                # decode linearly from the start of the file.
+                self._reopen()
+                self._decode_pos = -1
+                self._packet_iter = self._container.demux(self._video_stream)
+                entry = self._decode_until(frame_index)
+            return entry
 
         except Exception as e:
             print(f"Error decoding frame {frame_index}: {e}")
@@ -198,12 +219,19 @@ class Decoder:
         ):
             return
 
-        # Perform the seek using the keyframe's PTS
-        pts = self._frame_pts.get(kf_index)
-        if pts is not None:
-            self._container.seek(pts, stream=self._video_stream)
-        else:
-            self._container.seek(0, stream=self._video_stream)
+        # Perform the seek using the keyframe's DTS (backward seek lands
+        # at the nearest packet with timestamp <= target)
+        ts = self._frame_seek_ts.get(kf_index)
+        try:
+            if ts is not None:
+                self._container.seek(ts, stream=self._video_stream)
+            else:
+                self._container.seek(0, stream=self._video_stream)
+                kf_index = 0
+        except Exception:
+            # Unseekable input (e.g. raw Annex-B elementary stream):
+            # reopen the container and decode from the start.
+            self._reopen()
             kf_index = 0
 
         # Reset decode cursor to just before the keyframe
@@ -211,7 +239,32 @@ class Decoder:
         # Create a fresh demux iterator from the seek position
         self._packet_iter = self._container.demux(self._video_stream)
 
-    def _decode_until(self, target_index: int) -> Optional[np.ndarray]:
+    def _reopen(self) -> None:
+        """Reopen the container from scratch (fallback for unseekable input)."""
+        try:
+            self._container.close()
+        except Exception:
+            pass
+        self._container = av.open(self._file_path)
+        self._video_stream = next(
+            (s for s in self._container.streams if s.type == "video"), None
+        )
+        if self._video_stream is None:
+            raise ValueError("No video stream found on reopen")
+        codec_ctx = self._video_stream.codec_context
+        if self._extractor:
+            codec_ctx.options = {
+                **(codec_ctx.options or {}),
+                **self._extractor.decoder_options(),
+            }
+        try:
+            self._video_stream.thread_type = "AUTO"
+        except Exception:
+            pass
+
+    def _decode_until(
+        self, target_index: int
+    ) -> Optional[tuple[np.ndarray, Optional[FrameAnalysis]]]:
         """Decode frames from current position until target_index.
 
         All intermediate frames are cached for potential future use.
@@ -220,25 +273,47 @@ class Decoder:
             return None
 
         for packet in self._packet_iter:
+            # Process the WHOLE batch before returning: a single packet
+            # (especially the EOF flush packet with frame-threaded
+            # decoders) can yield many frames at once, and dropping the
+            # tail would lose frames that only exist in this batch.
+            found = None
             for frame in packet.decode():
                 self._decode_pos += 1
                 rgb = frame.to_ndarray(format="rgb24")
-                self._cache_put(self._decode_pos, rgb)
-
+                analysis = None
+                if self._extractor:
+                    try:
+                        analysis = self._extractor.extract(
+                            frame, self._decode_pos
+                        )
+                    except Exception:
+                        analysis = None
+                entry = (rgb, analysis)
+                self._cache_put(self._decode_pos, entry)
                 if self._decode_pos == target_index:
-                    return rgb
-                if self._decode_pos > target_index:
-                    # Overshot — return from cache if available
-                    return self._frame_cache.get(target_index)
+                    found = entry
 
-        return None
+            if found is not None:
+                return found
+            if self._decode_pos > target_index:
+                # Overshot — return from cache if available
+                return self._frame_cache.get(target_index)
 
-    def _cache_put(self, index: int, rgb: np.ndarray) -> None:
+        # Iterator exhausted (EOF reached): it must not be reused.
+        self._packet_iter = None
+        return self._frame_cache.get(target_index)
+
+    def _cache_put(
+        self,
+        index: int,
+        entry: tuple[np.ndarray, Optional[FrameAnalysis]],
+    ) -> None:
         """Add a frame to the LRU cache, evicting oldest if full."""
         if index in self._frame_cache:
             self._frame_cache.move_to_end(index)
         else:
-            self._frame_cache[index] = rgb
+            self._frame_cache[index] = entry
             if len(self._frame_cache) > self.CACHE_MAX:
                 self._frame_cache.popitem(last=False)
 
@@ -247,9 +322,7 @@ class Decoder:
         self._keyframe_indices = sorted(
             f.index for f in frames if f.is_keyframe
         )
-        self._frame_pts = {
-            f.index: f.pts for f in frames if f.pts is not None
-        }
+        self._frame_seek_ts = self._build_seek_ts(frames)
 
     @property
     def hw_accel(self) -> str:
