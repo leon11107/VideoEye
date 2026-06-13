@@ -37,12 +37,31 @@ _REC_HEVC = np.dtype([
     ("ref0", "i1"), ("ref1", "i1"), ("reserved", "<u2"),
 ])
 
+# VeyeBlockRecordAV1 (sidecar v2): u8 bsize, pred, mode, skip, i32 qp,
+# i16 mv0_x/y, i16 mv1_x/y, i8 ref0/ref1, u8 tx_size, u8 reserved (20 bytes).
+_REC_AV1 = np.dtype([
+    ("bsize", "u1"), ("pred", "u1"), ("mode", "u1"), ("skip", "u1"),
+    ("qp", "<i4"),
+    ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
+    ("ref0", "i1"), ("ref1", "i1"), ("tx_size", "u1"), ("reserved", "u1"),
+])
+
 # HEVC motion vectors are stored in quarter-pel luma units.
 _HEVC_MV_SCALE = 4.0
+# AV1 motion vectors are stored in eighth-pel luma units.
+_AV1_MV_SCALE = 8.0
 
 # codec_id values written into the header (AVCodecID, ABI-stable in practice).
 _CODEC_H264 = 27
 _CODEC_HEVC = 173
+_CODEC_AV1 = 225
+
+# libaom BLOCK_SIZE enum -> (luma width, height) px, indexed 0..BLOCK_SIZES_ALL-1.
+_AV1_BSIZE_WH = (
+    (4, 4), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16), (16, 32),
+    (32, 16), (32, 32), (32, 64), (64, 32), (64, 64), (64, 128), (128, 64),
+    (128, 128), (4, 16), (16, 4), (8, 32), (32, 8), (16, 64), (64, 16),
+)
 
 # FFmpeg MB_TYPE_* bits (libavcodec/mpegutils.h) — ABI-stable.
 MB_TYPE_INTRA4x4 = 1 << 0
@@ -86,8 +105,12 @@ class VeyeFrameBlocks:
     pred: Optional[np.ndarray] = None       # HEVC: PredType per cell
     intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
     pred_flag: Optional[np.ndarray] = None  # HEVC: PredFlag (0/1/2/3 = I/L0/L1/BI)
-    mv: Optional[np.ndarray] = None         # HEVC: int16 grid (h, w, 2 lists, 2 xy)
-    ref_idx: Optional[np.ndarray] = None    # HEVC: int8 grid (h, w, 2 lists)
+    mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
+    ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
+    bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
+    mode: Optional[np.ndarray] = None       # AV1: PREDICTION_MODE per cell
+    skip: Optional[np.ndarray] = None       # AV1: skip_txfm flag per cell
+    tx_size: Optional[np.ndarray] = None    # AV1: TX_SIZE per cell
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -149,6 +172,28 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             mv=mv, ref_idx=ref,
         )
 
+    if codec_id == _CODEC_AV1:
+        recs = np.frombuffer(payload, dtype=_REC_AV1, count=n_records,
+                             offset=_BLK_HDR.size)
+        mv = np.empty((grid_h, grid_w, 2, 2), dtype=np.int16)
+        mv[..., 0, 0] = recs["mv0_x"].reshape(grid_h, grid_w)
+        mv[..., 0, 1] = recs["mv0_y"].reshape(grid_h, grid_w)
+        mv[..., 1, 0] = recs["mv1_x"].reshape(grid_h, grid_w)
+        mv[..., 1, 1] = recs["mv1_y"].reshape(grid_h, grid_w)
+        ref = np.empty((grid_h, grid_w, 2), dtype=np.int8)
+        ref[..., 0] = recs["ref0"].reshape(grid_h, grid_w)
+        ref[..., 1] = recs["ref1"].reshape(grid_h, grid_w)
+        return VeyeFrameBlocks(
+            codec_id, grid_w, grid_h, block_unit,
+            qp=recs["qp"].reshape(grid_h, grid_w).copy(),
+            pred=recs["pred"].reshape(grid_h, grid_w).copy(),
+            bsize=recs["bsize"].reshape(grid_h, grid_w).copy(),
+            mode=recs["mode"].reshape(grid_h, grid_w).copy(),
+            skip=recs["skip"].reshape(grid_h, grid_w).copy(),
+            tx_size=recs["tx_size"].reshape(grid_h, grid_w).copy(),
+            mv=mv, ref_idx=ref,
+        )
+
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,
                          offset=_BLK_HDR.size)
     return VeyeFrameBlocks(
@@ -162,6 +207,8 @@ def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Decode a frame's per-cell grid into BLOCK_DTYPE partitions."""
     if fb.codec_id == _CODEC_HEVC:
         return _blocks_from_hevc(fb)
+    if fb.codec_id == _CODEC_AV1:
+        return _blocks_from_av1(fb)
 
     unit = fb.block_unit
     out: list[tuple] = []
@@ -206,6 +253,37 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     return arr
 
 
+def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Collapse the 4x4 MI grid into AV1 coding blocks.
+
+    ifd_inspect replicates the same mode-info across every 4x4 cell a coding
+    block covers. Each AV1 block is aligned to its own (w, h), so the cell at
+    the block's top-left corner is the unique cell whose pixel coordinates are
+    multiples of the block dimensions; we emit one rectangle there. The mode
+    field stores the libaom PREDICTION_MODE for labeling.
+    """
+    unit = fb.block_unit
+    bsize = fb.bsize
+    pred = fb.pred
+    mode = fb.mode
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            bs = int(bsize[my, mx])
+            if bs < 0 or bs >= len(_AV1_BSIZE_WH):
+                continue
+            bw, bh = _AV1_BSIZE_WH[bs]
+            px = mx * unit
+            if px % bw or py % bh:
+                continue  # not the top-left cell of this block
+            out.append((px, py, bw, bh, 0, int(pred[my, mx]), int(mode[my, mx])))
+    arr = np.empty(len(out), dtype=BLOCK_DTYPE)
+    for i, rec in enumerate(out):
+        arr[i] = rec
+    return arr
+
+
 def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
     """QP grid at block_unit-pixel granularity (int16, -1 = unknown)."""
     if fb.qp is None:
@@ -214,6 +292,51 @@ def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
 
 
 def mvs_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Motion vectors (MV_DTYPE) for one frame, one per prediction region."""
+    if fb.codec_id == _CODEC_AV1:
+        return _mvs_from_av1(fb)
+    return _mvs_from_hevc(fb)
+
+
+def _mvs_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Motion vectors for an AV1 frame, collapsed per coding block.
+
+    Each inter block emits an L0 vector (ref_frame[0] >= 1) and, for compound
+    prediction, an L1 vector (ref_frame[1] >= 1). ref_frame == 0 is INTRA_FRAME
+    (intra block, no motion). Vectors are converted from eighth-pel to pixels.
+    """
+    if fb.bsize is None or fb.mv is None or fb.ref_idx is None:
+        return np.empty(0, dtype=MV_DTYPE)
+    unit = fb.block_unit
+    bsize = fb.bsize
+    ref = fb.ref_idx
+    mv = fb.mv
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            bs = int(bsize[my, mx])
+            if bs < 0 or bs >= len(_AV1_BSIZE_WH):
+                continue
+            bw, bh = _AV1_BSIZE_WH[bs]
+            px = mx * unit
+            if px % bw or py % bh:
+                continue  # not the block's top-left cell
+            if int(ref[my, mx, 0]) >= 1:  # 0 = INTRA_FRAME
+                out.append((px, py, bw, bh, 0,
+                            mv[my, mx, 0, 0] / _AV1_MV_SCALE,
+                            mv[my, mx, 0, 1] / _AV1_MV_SCALE))
+            if int(ref[my, mx, 1]) >= 1:  # compound L1
+                out.append((px, py, bw, bh, 1,
+                            mv[my, mx, 1, 0] / _AV1_MV_SCALE,
+                            mv[my, mx, 1, 1] / _AV1_MV_SCALE))
+    arr = np.empty(len(out), dtype=MV_DTYPE)
+    for i, rec in enumerate(out):
+        arr[i] = rec
+    return arr
+
+
+def _mvs_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     """Motion vectors (MV_DTYPE) for an HEVC frame, one per prediction region.
 
     The motion field is sampled per min-CB. Cells are collapsed to their CU
