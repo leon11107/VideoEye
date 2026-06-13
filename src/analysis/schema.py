@@ -59,6 +59,11 @@ class FrameAnalysis:
     qp_unit: int = 16
     qp_grid: Optional[np.ndarray] = None
 
+    # QP value that maps to the hottest heatmap color. Default 63 leaves
+    # H.264/HEVC (max QP 51) rendering unchanged; AV1 sets 255 because its
+    # qp_grid holds current_qindex (0..255), not a 0..51 QP.
+    qp_max: int = 63
+
     # Motion vectors (MV_DTYPE) and coding blocks (BLOCK_DTYPE).
     mvs: Optional[np.ndarray] = None
     blocks: Optional[np.ndarray] = None

@@ -41,8 +41,11 @@ def render_qp_heatmap(painter: QPainter, analysis: FrameAnalysis) -> None:
     if grid is None:
         return
     rows, cols = grid.shape
-    qp = np.clip(grid, 0, QP_MAX)
-    rgba = _QP_LUT[qp]
+    # Normalize the codec's QP range onto the LUT: AV1 carries qindex
+    # (0..255), H.264/HEVC a 0..51 QP. qp_max maps to the hottest color.
+    qp_max = analysis.qp_max or QP_MAX
+    idx = np.clip(grid.astype(np.float32) * (QP_MAX / qp_max), 0, QP_MAX)
+    rgba = _QP_LUT[idx.astype(np.int32)]
     rgba[grid < 0] = 0  # unknown blocks fully transparent
 
     rgba = np.ascontiguousarray(rgba)

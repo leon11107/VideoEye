@@ -38,8 +38,8 @@ def validate_analysis(a, width, height, ctx):
               f"qp_grid shape {a.qp_grid.shape} != ({rows},{cols})", ctx)
         valid = a.qp_grid[a.qp_grid >= 0]
         if valid.size:
-            check(0 <= int(valid.min()) and int(valid.max()) <= 63,
-                  f"QP out of range [{valid.min()},{valid.max()}]", ctx)
+            check(0 <= int(valid.min()) and int(valid.max()) <= a.qp_max,
+                  f"QP out of range [{valid.min()},{valid.max()}] (max {a.qp_max})", ctx)
     if a.mvs is not None and len(a.mvs):
         m = a.mvs
         inside = ((m["x"] + m["w"] > 0) & (m["x"] < width)

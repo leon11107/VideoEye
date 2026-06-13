@@ -60,7 +60,10 @@ class BlockSidecar:
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
 
-        if not out.exists():
+        # Trust the cache only if it actually parses to frames; a truncated
+        # or empty file (e.g. an interrupted earlier run) must be regenerated.
+        frames = load_sidecar(str(out)) if out.exists() else None
+        if not frames:
             try:
                 subprocess.run(
                     [str(_PROBE), str(video_path), str(out)],
@@ -69,8 +72,9 @@ class BlockSidecar:
             except Exception as e:
                 print(f"veye_probe failed: {e}", file=sys.stderr)
                 return False
+            frames = load_sidecar(str(out))
 
-        self._frames = load_sidecar(str(out))
+        self._frames = frames
         return bool(self._frames)
 
     def blocks_for(self, frame_index: int) -> Optional[np.ndarray]:
