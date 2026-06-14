@@ -313,6 +313,8 @@ def _mb_pred(t: int) -> int:
         return PredType.INTRA
     if t & MB_TYPE_SKIP:
         return PredType.SKIP
+    if (t & _MB_TYPE_L0) and (t & _MB_TYPE_L1):
+        return PredType.BI  # uses both reference lists
     return PredType.INTER
 
 
@@ -347,6 +349,7 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     unit = fb.block_unit
     cu_log2 = fb.cu_log2
     pred = fb.pred
+    pf = fb.pred_flag
     out: list[tuple] = []
     for my in range(fb.grid_h):
         py = my * unit
@@ -356,7 +359,10 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
             px = mx * unit
             if px % cu_px or py % cu_px:
                 continue  # not the top-left cell of this CU
-            out.append((px, py, cu_px, cu_px, 0, int(pred[my, mx]), cl))
+            p = int(pred[my, mx])
+            if p == PredType.INTER and pf is not None and int(pf[my, mx]) == 3:
+                p = PredType.BI  # PredFlag 3 = bi-prediction
+            out.append((px, py, cu_px, cu_px, 0, p, cl))
     return _pack(out, BLOCK_DTYPE)
 
 

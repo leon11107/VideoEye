@@ -135,9 +135,10 @@ class FrameStatsPanel(QWidget):
             n = len(b)
             intra = int(np.count_nonzero(b["pred"] == PredType.INTRA))
             inter = int(np.count_nonzero(b["pred"] == PredType.INTER))
+            bi = int(np.count_nonzero(b["pred"] == PredType.BI))
             skip = int(np.count_nonzero(b["pred"] == PredType.SKIP))
             lines.append(f"Blocks: {n}  intra {intra} / inter {inter}"
-                         f" / skip {skip}")
+                         f" / bi {bi} / skip {skip}")
         else:
             lines.append("Partition/Types: pending patched-FFmpeg backend")
 

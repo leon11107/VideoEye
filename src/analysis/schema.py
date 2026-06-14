@@ -38,11 +38,12 @@ BLOCK_DTYPE = np.dtype([
 class PredType:
     UNKNOWN = 0
     INTRA = 1
-    INTER = 2
+    INTER = 2       # uni-directional inter (L0 or L1)
     SKIP = 3
     IPCM = 4
+    BI = 5          # bi-directional inter (L0 and L1)
 
-    NAMES = {0: "?", 1: "Intra", 2: "Inter", 3: "Skip", 4: "IPCM"}
+    NAMES = {0: "?", 1: "Intra", 2: "Inter", 3: "Skip", 4: "IPCM", 5: "BI"}
 
 
 @dataclass

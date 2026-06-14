@@ -13,11 +13,12 @@ from ..analysis import FrameAnalysis, PredType
 
 QP_MAX = 63  # covers H.264/HEVC (51) and leaves headroom for AV1 mapping
 
+# Block-type fill colors. SKIP is intentionally omitted (not coloured).
 _PRED_COLORS = {
-    PredType.INTRA: QColor(255, 64, 64, 90),
-    PredType.INTER: QColor(64, 110, 255, 90),
-    PredType.SKIP: QColor(110, 255, 110, 70),
-    PredType.IPCM: QColor(255, 255, 64, 110),
+    PredType.INTRA: QColor(255, 64, 64, 90),    # red
+    PredType.INTER: QColor(64, 110, 255, 90),   # blue (uni-directional)
+    PredType.BI: QColor(80, 200, 80, 90),       # green (bi-directional)
+    PredType.IPCM: QColor(255, 255, 64, 110),   # yellow
 }
 
 
