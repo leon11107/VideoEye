@@ -10,12 +10,19 @@ from PyQt6.QtGui import QFont, QTextCharFormat, QColor, QTextCursor
 class HexViewer(QWidget):
     """Displays hex dump of binary data."""
 
+    # Max bytes rendered at once. A 4K intra frame's packet can be 1-2 MB;
+    # rendering it all as per-byte HTML spans froze the UI on every frame
+    # select. We render a bounded window (with absolute offsets) and recenter
+    # it on the selected NAL unit / scrolled-to offset instead.
+    WINDOW_BYTES = 64 * 1024
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = bytes()
         self._bytes_per_line = 16
         self._highlight_start = -1
         self._highlight_end = -1
+        self._win_start = 0  # byte offset of the first rendered line
         self._setup_ui()
 
     def _setup_ui(self):
@@ -67,11 +74,21 @@ class HexViewer(QWidget):
         self._data = data
         self._highlight_start = highlight_start
         self._highlight_end = highlight_end
+        self._win_start = self._window_for(highlight_start if highlight_start >= 0 else 0)
         self._update_display()
+
+    def _window_for(self, center: int) -> int:
+        """Byte offset (line-aligned) where a window centred on `center` starts."""
+        bpl = self._bytes_per_line
+        max_start = max(0, len(self._data) - self.WINDOW_BYTES)
+        start = max(0, center - self.WINDOW_BYTES // 2)
+        start = min(start, max_start)
+        return (start // bpl) * bpl  # align to a line boundary
 
     def _on_bytes_changed(self, value: int) -> None:
         """Handle bytes per line change."""
         self._bytes_per_line = value
+        self._win_start = self._window_for(self._win_start)  # re-align to bpl
         self._update_display()
 
     def _update_display(self) -> None:
@@ -81,14 +98,22 @@ class HexViewer(QWidget):
             self._info_label.setText("No data")
             return
 
-        self._info_label.setText(f"{len(self._data):,} bytes")
-
-        # Build hex dump text with HTML formatting
-        lines = []
-        offset = 0
         bpl = self._bytes_per_line
+        total = len(self._data)
+        win_start = self._win_start
+        win_end = min(total, win_start + self.WINDOW_BYTES)
+        if win_start > 0 or win_end < total:
+            self._info_label.setText(
+                f"{total:,} bytes (showing {win_start:,}-{win_end:,})"
+            )
+        else:
+            self._info_label.setText(f"{total:,} bytes")
 
-        while offset < len(self._data):
+        # Build hex dump text with HTML formatting, for the window only.
+        lines = []
+        offset = win_start
+
+        while offset < win_end:
             chunk = self._data[offset:offset + bpl]
 
             # Offset column
@@ -147,6 +172,8 @@ class HexViewer(QWidget):
         """Set highlight range."""
         self._highlight_start = start
         self._highlight_end = end
+        if start >= 0:
+            self._win_start = self._window_for(start)
         self._update_display()
 
     def clear_highlight(self) -> None:
@@ -160,21 +187,26 @@ class HexViewer(QWidget):
         if not self._data or offset < 0:
             return
 
-        # Calculate line number
-        line = offset // self._bytes_per_line
+        # Re-render the window around the offset if it falls outside it.
+        if not (self._win_start <= offset < self._win_start + self.WINDOW_BYTES):
+            self._win_start = self._window_for(offset)
+            self._update_display()
 
-        # Move cursor to that line
-        cursor = self._text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
-        for _ in range(line):
-            cursor.movePosition(QTextCursor.MoveOperation.Down)
-        self._text_edit.setTextCursor(cursor)
-        self._text_edit.ensureCursorVisible()
+        # Line within the current window; jump straight to that block (O(1))
+        # rather than stepping the cursor down line by line.
+        line = (offset - self._win_start) // self._bytes_per_line
+        block = self._text_edit.document().findBlockByLineNumber(line)
+        if block.isValid():
+            cursor = self._text_edit.textCursor()
+            cursor.setPosition(block.position())
+            self._text_edit.setTextCursor(cursor)
+            self._text_edit.ensureCursorVisible()
 
     def clear(self) -> None:
         """Clear the display."""
         self._data = bytes()
         self._highlight_start = -1
         self._highlight_end = -1
+        self._win_start = 0
         self._text_edit.clear()
         self._info_label.setText("No data")
