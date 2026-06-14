@@ -79,8 +79,6 @@ class Decoder:
     4. Multi-threaded decoding: uses FFmpeg's thread-based parallelism
     """
 
-    # Max frames to decode forward without re-seeking
-    FORWARD_THRESHOLD = 50
     # LRU cache capacity (number of decoded RGB frames)
     # 16 frames @ 1080p ≈ 96 MB; keeps memory bounded while covering
     # a typical GOP for smooth back/forward navigation.
@@ -93,8 +91,23 @@ class Decoder:
         # File handle backing a byte-offset open (None when opened by path).
         # Owned by us and closed alongside the container.
         self._fileobj = None
-        # Decode cursor: index of the last successfully decoded frame
+        # Frame indexing is decode/bitstream order throughout (same as the
+        # demuxer's frame list and the bar chart). The decoder, however,
+        # *emits* frames in presentation order, so each emitted frame is
+        # mapped back to its decode-order index via its pts.
+        #   _decode_pos : decode index of the last packet fed to the decoder
+        #                 (the forward frontier; monotonic within a run)
+        #   _run_kf     : keyframe (decode index) the current run started at
+        #   _emit_next  : decode index to assign to the next emitted frame
+        #                 when it carries no pts (raw streams: emission order
+        #                 equals decode order for non-reordered content)
         self._decode_pos: int = -1
+        self._run_kf: int = -1
+        self._emit_next: int = 0
+        # pts -> decode-order index, and decode-order index -> presentation
+        # rank. Built at open from the demuxer frame list.
+        self._pts_to_index: dict[int, int] = {}
+        self._index_to_display: dict[int, int] = {}
         # Active demux iterator (kept alive for sequential access)
         self._packet_iter = None
         # LRU cache: frame_index -> (rgb array, FrameAnalysis or None)
@@ -209,6 +222,11 @@ class Decoder:
         self._frame_cache.clear()
         self._keyframe_indices.clear()
         self._keyframe_pos.clear()
+        self._pts_to_index.clear()
+        self._index_to_display.clear()
+        self._decode_pos = -1
+        self._run_kf = -1
+        self._emit_next = 0
         self._raw_stream = False
         self._format_name = ""
 
@@ -244,15 +262,19 @@ class Decoder:
         # not overwritten). The analysis object is shared with the cache, so
         # this populates the cached entry too (no re-fetch on later reads).
         if analysis is not None and self._block_sidecar is not None:
+            # The sidecar (patched-FFmpeg probe) keys frames in presentation
+            # order; map the decode-order index to that rank so QP/MV overlay
+            # data lines up with the decoded picture.
+            sc_index = self._index_to_display.get(frame_index, frame_index)
             if analysis.blocks is None:
-                analysis.blocks = self._block_sidecar.blocks_for(frame_index)
+                analysis.blocks = self._block_sidecar.blocks_for(sc_index)
             if analysis.mvs is None:
-                analysis.mvs = self._block_sidecar.mvs_for(frame_index)
+                analysis.mvs = self._block_sidecar.mvs_for(sc_index)
             if analysis.qp_grid is None:
-                grid = self._block_sidecar.qp_grid_for(frame_index)
+                grid = self._block_sidecar.qp_grid_for(sc_index)
                 if grid is not None:
                     analysis.qp_grid = grid
-                    unit = self._block_sidecar.block_unit_for(frame_index)
+                    unit = self._block_sidecar.block_unit_for(sc_index)
                     if unit:
                         analysis.qp_unit = unit
         return analysis
@@ -285,34 +307,37 @@ class Decoder:
             return self._frame_cache[frame_index]
 
         try:
-            # 2. Determine if we can continue from current position
+            kf_index, _ = self._nearest_keyframe(frame_index)
+
+            # 2. Continue the current run only if it began at this frame's
+            # keyframe (same GOP) and has not yet fed this frame's packet to
+            # the decoder. Otherwise seek: a different GOP, or the frame was
+            # already emitted and evicted, both need a fresh decode.
             can_continue = (
                 self._packet_iter is not None
-                and self._decode_pos >= 0
-                and frame_index > self._decode_pos
-                and frame_index - self._decode_pos <= self.FORWARD_THRESHOLD
+                and self._run_kf == kf_index
+                and self._decode_pos < frame_index
             )
-
             if not can_continue:
-                # 3. Seek to nearest keyframe before target
                 self._seek_to_keyframe(frame_index)
 
-            # 4. Decode forward to the target frame
+            # 3. Decode forward until the target frame is produced.
             entry = self._decode_until(frame_index)
             if entry is None:
-                # Retry once from a fresh seek. Handles iterators that
-                # hit EOF (e.g. the target was flushed out in a batch
-                # while serving an earlier frame).
+                # Retry once from a fresh seek (iterator may have hit EOF).
                 self._packet_iter = None
                 self._seek_to_keyframe(frame_index)
                 entry = self._decode_until(frame_index)
             if entry is None:
-                # Last resort: decode linearly from the very start. Frame 0
-                # is always a correct anchor, so this guarantees the right
-                # frame even if the keyframe index or a GOP is malformed.
+                # Last resort: decode linearly from the very start. Frame 0 is
+                # always a correct anchor, so this yields the right frame even
+                # for open-GOP keyframes whose leading pictures cannot be
+                # reconstructed from a mid-stream entry point.
                 self._reopen()
-                self._decode_pos = -1
                 self._packet_iter = self._container.demux(self._video_stream)
+                self._run_kf = 0
+                self._decode_pos = -1
+                self._emit_next = 0
                 entry = self._decode_until(frame_index)
             return entry
 
@@ -337,25 +362,20 @@ class Decoder:
         """
         kf_index, kf_pos = self._nearest_keyframe(target_index)
 
-        # Already positioned inside this GOP and before the target: keep
-        # decoding forward from here rather than reparsing from the start.
-        if (
-            self._packet_iter is not None
-            and kf_index <= self._decode_pos < target_index
-        ):
-            return
-
         # Fast path: byte-offset seek straight to the keyframe (raw streams).
         if self._raw_stream and kf_pos is not None and self._open_at_offset(kf_pos):
             self._packet_iter = self._container.demux(self._video_stream)
-            self._decode_pos = kf_index - 1
-            return
+        else:
+            # Fallback: reopen for a fresh decoder, parse-skip to the keyframe.
+            self._reopen()
+            self._packet_iter = self._container.demux(self._video_stream)
+            self._skip_packets_to(kf_index)
 
-        # Fallback: reopen for a fresh decoder, then parse-skip to the keyframe.
-        self._reopen()
-        self._packet_iter = self._container.demux(self._video_stream)
-        self._skip_packets_to(kf_index)
+        # The next packet fed to the decoder is the keyframe (decode index
+        # kf_index); the first emitted frame of this run is also kf_index.
+        self._run_kf = kf_index
         self._decode_pos = kf_index - 1
+        self._emit_next = kf_index
 
     def _nearest_keyframe(self, target_index: int) -> tuple[int, Optional[int]]:
         """Decode-order index and byte offset of the nearest keyframe <= target.
@@ -446,44 +466,59 @@ class Decoder:
     def _decode_until(
         self, target_index: int
     ) -> Optional[tuple[np.ndarray, Optional[FrameAnalysis]]]:
-        """Decode frames from current position until target_index.
+        """Decode forward until the frame at decode index target_index appears.
 
-        All intermediate frames are cached for potential future use.
+        Each emitted frame is mapped to its decode-order index (via pts, or
+        emission order for raw streams) and cached, so intermediate frames are
+        reusable. _decode_pos tracks the decode frontier (last packet fed in).
         """
         if self._packet_iter is None:
             return None
 
         for packet in self._packet_iter:
-            # Process the WHOLE batch before returning: a single packet
-            # (especially the EOF flush packet with frame-threaded
-            # decoders) can yield many frames at once, and dropping the
-            # tail would lose frames that only exist in this batch.
+            if packet.size:  # not the flush packet
+                self._decode_pos += 1
+            # Process the WHOLE batch: one packet (especially the EOF flush
+            # with frame-threaded decoders) can yield many frames at once.
+            # Capture the target within the batch so a large batch cannot
+            # evict it from the LRU cache before we return it.
             found = None
             for frame in packet.decode():
-                self._decode_pos += 1
+                index = self._label_frame(frame)
                 rgb = frame.to_ndarray(format="rgb24")
                 analysis = None
                 if self._extractor:
                     try:
-                        analysis = self._extractor.extract(
-                            frame, self._decode_pos
-                        )
+                        analysis = self._extractor.extract(frame, index)
                     except Exception:
                         analysis = None
                 entry = (rgb, analysis)
-                self._cache_put(self._decode_pos, entry)
-                if self._decode_pos == target_index:
+                self._cache_put(index, entry)
+                if index == target_index:
                     found = entry
 
             if found is not None:
                 return found
-            if self._decode_pos > target_index:
-                # Overshot — return from cache if available
-                return self._frame_cache.get(target_index)
 
         # Iterator exhausted (EOF reached): it must not be reused.
         self._packet_iter = None
         return self._frame_cache.get(target_index)
+
+    def _label_frame(self, frame) -> int:
+        """Decode-order index for an emitted (presentation-order) frame.
+
+        Containers carry a pts that maps straight to the decode index. Raw
+        streams have no pts; there emission order equals decode order (for
+        non-reordered content), so we hand out indices sequentially from the
+        run's keyframe.
+        """
+        if frame.pts is not None:
+            mapped = self._pts_to_index.get(frame.pts)
+            if mapped is not None:
+                return mapped
+        index = self._emit_next
+        self._emit_next += 1
+        return index
 
     def _cache_put(
         self,
@@ -503,16 +538,32 @@ class Decoder:
         self._build_keyframe_index(frames)
 
     def _build_keyframe_index(self, frames: list[FrameInfo]) -> None:
-        """Build the sorted keyframe index and its byte-offset map.
+        """Build the keyframe index, byte-offset map, and order maps.
 
         A keyframe contributes a byte offset only when one was recorded
         (raw streams); without it the seek falls back to parse-skip.
+
+        The order maps translate between the decoder's presentation-order
+        output and the canonical decode order: pts -> decode index links an
+        emitted frame to its bar-chart frame, and decode index -> display
+        rank lets the (presentation-order) block sidecar be queried for a
+        decode-order frame. Both are empty for raw streams with no pts, where
+        emission order already equals decode order.
         """
         self._keyframe_indices = sorted(f.index for f in frames if f.is_keyframe)
         self._keyframe_pos = {
             f.index: f.pos
             for f in frames
             if f.is_keyframe and f.pos is not None
+        }
+        self._pts_to_index = {
+            f.pts: f.index for f in frames if f.pts is not None
+        }
+        # Presentation rank = position when frames are ordered by pts.
+        with_pts = [(f.pts, f.index) for f in frames if f.pts is not None]
+        with_pts.sort()
+        self._index_to_display = {
+            idx: rank for rank, (_pts, idx) in enumerate(with_pts)
         }
 
     @property
