@@ -549,12 +549,7 @@ class MainWindow(QMainWindow):
 
         # Update bar chart selection + mark this frame's reference frames.
         self._barchart_view.select_frame(index)
-        if self._decoder.is_open:
-            refs = self._decoder.refs_for(index)
-            if refs is not None:
-                self._barchart_view.set_ref_markers(refs[0], refs[1])
-            else:
-                self._barchart_view.set_ref_markers([], [])
+        self._update_ref_markers(index)
 
         # NALU/hex views are cheap and independent of decoding; update them
         # immediately for instant feedback. Skip during playback.
@@ -588,6 +583,14 @@ class MainWindow(QMainWindow):
         packet_data = self._demuxer.read_packet_data(frame.index)
         self._stream_viewer.display_frame(frame, packet_data)
         self._hex_viewer.set_data(packet_data)
+
+    def _update_ref_markers(self, index: int) -> None:
+        """Mark frame `index`'s reference frames on the chart (or clear)."""
+        refs = self._decoder.refs_for(index) if self._decoder.is_open else None
+        if refs is not None:
+            self._barchart_view.set_ref_markers(refs[0], refs[1])
+        else:
+            self._barchart_view.set_ref_markers([], [])
 
     def _on_frame_selected(self, index: int):
         """Handle frame selection from bar chart."""
@@ -710,6 +713,7 @@ class MainWindow(QMainWindow):
         index, rgb, _ = res
         self._current_index = index
         self._barchart_view.select_frame(index)
+        self._update_ref_markers(index)  # follow references during playback
         self._decoded_view.display_frame(rgb, index, analysis if want_analysis else None)
         if want_analysis:
             self._frame_stats.set_analysis(analysis)
