@@ -483,11 +483,28 @@ class MainWindow(QMainWindow):
 
         Only one packet's data is in memory at a time — the classifier
         receives the bytes, classifies I/P/B, and the data is discarded.
+
+        For raw elementary streams (no container timestamps) a POC tracker is
+        run in the same pass to derive each frame's display order, so the
+        decoder can map decode-order frames to the decoder's output order.
         """
+        poc_tracker = None
+        frames = self._demuxer.frames
+        is_raw = bool(frames) and all(f.pts is None for f in frames[:8])
+        # POC only matters when decode order can differ from display order,
+        # i.e. there are non-keyframes. An all-intra stream is already in
+        # display order, so skip the tracker (and its full-file byte read).
+        if is_raw and any(not f.is_keyframe for f in frames):
+            from .parsers.poc import create_poc_tracker
+            poc_tracker = create_poc_tracker(self._demuxer.codec_name)
+
         self._demuxer.classify_frame_types(
             self._stream_viewer.get_frame_type_from_nalus,
             progress_cb=progress_cb,
+            poc_tracker=poc_tracker,
         )
+        # The decoder is opened after this pass (see _load_file), so it builds
+        # its order maps from the now poc-bearing frame list automatically.
 
     def _select_frame(self, index: int):
         """Select and display a frame.

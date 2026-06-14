@@ -239,6 +239,7 @@ class Demuxer:
         self,
         classifier_fn: Callable[[bytes], FrameType],
         progress_cb: Optional[Callable[[str, int, int], None]] = None,
+        poc_tracker=None,
     ) -> None:
         """Refine frame types in a single sequential pass.
 
@@ -248,6 +249,12 @@ class Demuxer:
 
         progress_cb(stage, current, total) is called periodically so the
         caller can drive a real progress bar; total is the exact frame count.
+
+        poc_tracker, when given, is fed every frame's bytes in decode order to
+        derive each frame's display key (FrameInfo.poc) -- used for raw streams
+        that have no container timestamps. If any frame's POC cannot be
+        derived the whole stream's poc is cleared, so callers fall back to
+        emission order rather than trusting a partial mapping.
         """
         try:
             tmp = av.open(self._file_path)
@@ -260,6 +267,7 @@ class Demuxer:
 
             total = len(self._frames)
             idx = 0
+            poc_ok = poc_tracker is not None
             for packet in tmp.demux(stream):
                 if packet.size == 0:  # flush packet
                     continue
@@ -267,16 +275,31 @@ class Demuxer:
                     break
 
                 frame = self._frames[idx]
-                if not frame.is_keyframe:
+                # POC needs every frame (incl. keyframes, which reset it);
+                # type refinement only needs the non-keyframes.
+                need_bytes = poc_tracker is not None or not frame.is_keyframe
+                if need_bytes:
                     packet_bytes = bytes(packet)
-                    ft = classifier_fn(packet_bytes)
-                    if ft != FrameType.UNKNOWN:
-                        frame.frame_type = ft
+                    if not frame.is_keyframe:
+                        ft = classifier_fn(packet_bytes)
+                        if ft != FrameType.UNKNOWN:
+                            frame.frame_type = ft
+                    if poc_tracker is not None:
+                        key = poc_tracker.feed(packet_bytes)
+                        if key is None:
+                            poc_ok = False
+                        frame.poc = key
                     # packet_bytes goes out of scope immediately
 
                 idx += 1
                 if progress_cb is not None and (idx & 0x3F) == 0:
                     progress_cb("classify", idx, total)
+
+            # Partial POC is worse than none: clear it so the decoder uses
+            # emission order uniformly instead of a half-built mapping.
+            if poc_tracker is not None and not poc_ok:
+                for f in self._frames:
+                    f.poc = None
 
             if progress_cb is not None:
                 progress_cb("classify", total, total)

@@ -108,6 +108,12 @@ class Decoder:
         # rank. Built at open from the demuxer frame list.
         self._pts_to_index: dict[int, int] = {}
         self._index_to_display: dict[int, int] = {}
+        # Raw streams have no pts: _emit_order lists decode indices in the
+        # decoder's output (display) order, derived from POC. _emit_ptr walks
+        # it as frames are emitted. None when POC is unavailable (then
+        # emission order is assumed to equal decode order).
+        self._emit_order: Optional[list[int]] = None
+        self._emit_ptr: int = 0
         # Active demux iterator (kept alive for sequential access)
         self._packet_iter = None
         # LRU cache: frame_index -> (rgb array, FrameAnalysis or None)
@@ -224,6 +230,8 @@ class Decoder:
         self._keyframe_pos.clear()
         self._pts_to_index.clear()
         self._index_to_display.clear()
+        self._emit_order = None
+        self._emit_ptr = 0
         self._decode_pos = -1
         self._run_kf = -1
         self._emit_next = 0
@@ -338,6 +346,7 @@ class Decoder:
                 self._run_kf = 0
                 self._decode_pos = -1
                 self._emit_next = 0
+                self._emit_ptr = 0
                 entry = self._decode_until(frame_index)
             return entry
 
@@ -372,10 +381,12 @@ class Decoder:
             self._skip_packets_to(kf_index)
 
         # The next packet fed to the decoder is the keyframe (decode index
-        # kf_index); the first emitted frame of this run is also kf_index.
+        # kf_index); the run's first emitted frame is the keyframe, which sits
+        # at its display rank in the POC-derived emission order.
         self._run_kf = kf_index
         self._decode_pos = kf_index - 1
         self._emit_next = kf_index
+        self._emit_ptr = self._index_to_display.get(kf_index, kf_index)
 
     def _nearest_keyframe(self, target_index: int) -> tuple[int, Optional[int]]:
         """Decode-order index and byte offset of the nearest keyframe <= target.
@@ -507,15 +518,20 @@ class Decoder:
     def _label_frame(self, frame) -> int:
         """Decode-order index for an emitted (presentation-order) frame.
 
-        Containers carry a pts that maps straight to the decode index. Raw
-        streams have no pts; there emission order equals decode order (for
-        non-reordered content), so we hand out indices sequentially from the
-        run's keyframe.
+        Three mappings, in order of reliability:
+        - pts -> decode index (containers);
+        - POC-derived emission order (raw streams with a full POC mapping);
+        - sequential from the run's keyframe (raw without POC: emission order
+          is assumed to equal decode order, correct for non-reordered content).
         """
         if frame.pts is not None:
             mapped = self._pts_to_index.get(frame.pts)
             if mapped is not None:
                 return mapped
+        if self._emit_order is not None and 0 <= self._emit_ptr < len(self._emit_order):
+            index = self._emit_order[self._emit_ptr]
+            self._emit_ptr += 1
+            return index
         index = self._emit_next
         self._emit_next += 1
         return index
@@ -559,11 +575,22 @@ class Decoder:
         self._pts_to_index = {
             f.pts: f.index for f in frames if f.pts is not None
         }
-        # Presentation rank = position when frames are ordered by pts.
-        with_pts = [(f.pts, f.index) for f in frames if f.pts is not None]
-        with_pts.sort()
+        # Presentation rank = position when frames are ordered by their display
+        # key: pts for containers, POC for raw streams (every frame must carry
+        # one, else we leave the maps empty and fall back to emission order).
+        if self._pts_to_index:
+            ordered = sorted(
+                ((f.pts, f.index) for f in frames if f.pts is not None)
+            )
+            self._emit_order = None
+        elif frames and all(f.poc is not None for f in frames):
+            ordered = sorted((f.poc, f.index) for f in frames)
+            self._emit_order = [idx for _key, idx in ordered]
+        else:
+            ordered = []
+            self._emit_order = None
         self._index_to_display = {
-            idx: rank for rank, (_pts, idx) in enumerate(with_pts)
+            idx: rank for rank, (_key, idx) in enumerate(ordered)
         }
 
     @property
