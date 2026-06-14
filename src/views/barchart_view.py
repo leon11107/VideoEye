@@ -15,8 +15,8 @@ class BarChartWidget(QWidget):
     # Colors for frame types
     COLORS = {
         FrameType.I: QColor(220, 50, 50),    # Red for I-frames
-        FrameType.P: QColor(50, 180, 50),    # Green for P-frames
-        FrameType.B: QColor(50, 100, 220),   # Blue for B-frames
+        FrameType.P: QColor(50, 100, 220),   # Blue for P-frames
+        FrameType.B: QColor(50, 180, 50),    # Green for B-frames
         FrameType.UNKNOWN: QColor(150, 150, 150),  # Gray for unknown
     }
 
