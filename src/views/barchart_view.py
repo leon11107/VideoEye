@@ -1,10 +1,8 @@
 """Frame bar chart visualization."""
 
 from PyQt6.QtWidgets import QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QLabel
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF
-from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon, QPainterPath
-)
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint
+from PyQt6.QtGui import QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon
 
 from ..core.frame_info import FrameInfo, FrameType
 
@@ -153,51 +151,31 @@ class BarChartWidget(QWidget):
 
     def _draw_ref_markers(self, painter: QPainter, step: int, first: int,
                           last: int, height: int, available_height: int) -> None:
-        """For the selected frame, arc to each reference frame and place a
-        circled ref-index right above that frame's bar, with a short tick
-        connecting the circle to the bar so the target is unambiguous.
-        L0 red, L1 green."""
-        sel = self._selected_index
-        if (not self._ref_l0 and not self._ref_l1) or sel < 0:
+        """Circled ref-index numbers in a fixed top row for the selected
+        frame's references (L0 red, L1 green), each joined to its frame's size
+        bar by a dashed vertical guide line so the target is unambiguous."""
+        if (not self._ref_l0 and not self._ref_l1) or self._selected_index < 0:
             return
         d = 13  # circle diameter
-
-        def marker_y(i):  # circle-center y, just above the bar (clamped on top)
-            return max(d, self._bar_top(i, height, available_height) - 6)
-
-        sel_x = 5 + sel * step + self._bar_width // 2
-        sel_y = marker_y(sel)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 0))
-        painter.drawEllipse(sel_x - 3, sel_y - 3, 6, 6)
-
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
-        for refs, color in ((self._ref_l0, QColor(220, 40, 40)),
-                            (self._ref_l1, QColor(40, 170, 60))):
+        for refs, color, row_y in ((self._ref_l0, QColor(220, 40, 40), 3),
+                                   (self._ref_l1, QColor(40, 170, 60), 3 + d + 2)):
             for ref_idx, fidx in enumerate(refs):
                 if not (first <= fidx <= last):
                     continue
                 rx = 5 + fidx * step + self._bar_width // 2
-                ry = marker_y(fidx)
                 btop = self._bar_top(fidx, height, available_height)
-                # Tick from the circle down onto the referenced bar.
-                painter.setPen(QPen(color, 1))
-                painter.drawLine(rx, ry + d // 2, rx, btop)
-                # Arc from the selected frame to this reference's circle.
-                lift = min(28, 12 + abs(rx - sel_x) * 0.18)
-                cy = min(sel_y, ry) - lift
-                path = QPainterPath(QPointF(sel_x, sel_y))
-                path.quadTo(QPointF((sel_x + rx) / 2, cy), QPointF(rx, ry))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(color, 1.3))
-                painter.drawPath(path)
-                # Circled ref index sitting right above the bar.
+                # Dashed guide from the circle down to the referenced bar.
+                if btop > row_y + d:
+                    painter.setPen(QPen(color, 1, Qt.PenStyle.DashLine))
+                    painter.drawLine(rx, row_y + d, rx, btop)
+                # Circled ref index.
                 painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
                 painter.setPen(QPen(QColor(255, 255, 255), 1))
-                painter.drawEllipse(rx - d // 2, ry - d // 2, d, d)
-                painter.drawText(QRect(rx - d // 2, ry - d // 2, d, d),
+                painter.drawEllipse(rx - d // 2, row_y, d, d)
+                painter.drawText(QRect(rx - d // 2, row_y, d, d),
                                  Qt.AlignmentFlag.AlignCenter, str(ref_idx))
 
     def _draw_legend(self, painter: QPainter, rect: QRect) -> None:
