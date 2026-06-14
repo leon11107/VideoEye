@@ -1,6 +1,6 @@
 """Frame metadata container."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -26,7 +26,6 @@ class FrameInfo:
     size: int = 0  # Frame size in bytes
     is_keyframe: bool = False  # Is this a keyframe/IDR
     frame_type: FrameType = FrameType.UNKNOWN
-    packet_data: bytes = field(default_factory=bytes, repr=False)  # Raw packet data
 
     # Timing in seconds (calculated from pts and time_base)
     time_seconds: float = 0.0

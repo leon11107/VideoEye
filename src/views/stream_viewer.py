@@ -94,8 +94,8 @@ class StreamViewer(QWidget):
             for nalu in nalus:
                 self._h264_parser.parse_nalu(nalu)
 
-    def display_frame(self, frame: FrameInfo) -> None:
-        """Display NAL unit structure for a frame."""
+    def display_frame(self, frame: FrameInfo, packet_data: bytes = b"") -> None:
+        """Display NAL unit structure for a frame's packet bytes."""
         self._tree.clear()
         self._current_frame = frame
         self._nalus = []
@@ -105,7 +105,7 @@ class StreamViewer(QWidget):
             return
 
         # Parse NAL units
-        self._nalus = self._nalu_parser.parse(frame.packet_data)
+        self._nalus = self._nalu_parser.parse(packet_data)
 
         # Update info label
         slice_count = sum(1 for n in self._nalus if n.is_slice())

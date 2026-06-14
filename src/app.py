@@ -22,29 +22,6 @@ from .views.hex_viewer import HexViewer
 from .views.block_info_view import BlockInfoView
 
 
-class LoadWorker(QThread):
-    """Worker thread for loading video files."""
-
-    finished = pyqtSignal(bool, str)
-    progress = pyqtSignal(str)
-
-    def __init__(self, demuxer: Demuxer, file_path: str):
-        super().__init__()
-        self._demuxer = demuxer
-        self._file_path = file_path
-
-    def run(self):
-        try:
-            self.progress.emit("Opening file...")
-            success = self._demuxer.open(self._file_path)
-            if success:
-                self.finished.emit(True, "")
-            else:
-                self.finished.emit(False, "Failed to open file")
-        except Exception as e:
-            self.finished.emit(False, str(e))
-
-
 class DecodeWorker(QThread):
     """Serializes all decoder access on one thread.
 
@@ -644,15 +621,10 @@ class MainWindow(QMainWindow):
 
     def _update_analysis_views(self, frame: 'FrameInfo'):
         """Load packet data on demand and update NALU & hex views."""
-        # Lazy-load packet data (only one packet in memory)
+        # Lazy-load packet data (only one packet in memory at a time)
         packet_data = self._demuxer.read_packet_data(frame.index)
-
-        # Temporarily set for stream_viewer which reads frame.packet_data
-        frame.packet_data = packet_data
-        self._stream_viewer.display_frame(frame)
+        self._stream_viewer.display_frame(frame, packet_data)
         self._hex_viewer.set_data(packet_data)
-        # Clear reference so it can be GC'd when no longer displayed
-        frame.packet_data = b''
 
     def _on_frame_selected(self, index: int):
         """Handle frame selection from bar chart."""
