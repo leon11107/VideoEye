@@ -275,6 +275,14 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
     )
 
 
+def _pack(out: list, dtype) -> np.ndarray:
+    """Build a structured array from a list of record tuples in one C-level
+    conversion, instead of allocating and filling element-by-element."""
+    if not out:
+        return np.empty(0, dtype=dtype)
+    return np.array(out, dtype=dtype)
+
+
 def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Decode a frame's per-cell grid into BLOCK_DTYPE partitions."""
     if fb.codec_id == _CODEC_HEVC:
@@ -291,10 +299,7 @@ def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
             bx, by = mx * unit, my * unit
             for x, y, w, h, shape, pred in _partition(t, bx, by, unit):
                 out.append((x, y, w, h, 0, pred, shape))
-    arr = np.empty(len(out), dtype=BLOCK_DTYPE)
-    for i, rec in enumerate(out):
-        arr[i] = rec
-    return arr
+    return _pack(out, BLOCK_DTYPE)
 
 
 def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -319,10 +324,7 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
             if px % cu_px or py % cu_px:
                 continue  # not the top-left cell of this CU
             out.append((px, py, cu_px, cu_px, 0, int(pred[my, mx]), cl))
-    arr = np.empty(len(out), dtype=BLOCK_DTYPE)
-    for i, rec in enumerate(out):
-        arr[i] = rec
-    return arr
+    return _pack(out, BLOCK_DTYPE)
 
 
 def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -350,10 +352,7 @@ def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
             if px % bw or py % bh:
                 continue  # not the top-left cell of this block
             out.append((px, py, bw, bh, 0, int(pred[my, mx]), int(mode[my, mx])))
-    arr = np.empty(len(out), dtype=BLOCK_DTYPE)
-    for i, rec in enumerate(out):
-        arr[i] = rec
-    return arr
+    return _pack(out, BLOCK_DTYPE)
 
 
 def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
@@ -402,10 +401,7 @@ def _mvs_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
                 out.append((px, py, bw, bh, 1,
                             mv[my, mx, 1, 0] / _AV1_MV_SCALE,
                             mv[my, mx, 1, 1] / _AV1_MV_SCALE))
-    arr = np.empty(len(out), dtype=MV_DTYPE)
-    for i, rec in enumerate(out):
-        arr[i] = rec
-    return arr
+    return _pack(out, MV_DTYPE)
 
 
 def _mvs_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -460,10 +456,7 @@ def _mvs_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
                             emit(px + dx * unit, py + dy * unit, unit,
                                  f, sub_mv[dy, dx])
 
-    arr = np.empty(len(out), dtype=MV_DTYPE)
-    for i, rec in enumerate(out):
-        arr[i] = rec
-    return arr
+    return _pack(out, MV_DTYPE)
 
 
 def _partition(t: int, bx: int, by: int, u: int):
