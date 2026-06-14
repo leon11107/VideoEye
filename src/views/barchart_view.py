@@ -1,8 +1,10 @@
 """Frame bar chart visualization."""
 
 from PyQt6.QtWidgets import QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QLabel
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint
-from PyQt6.QtGui import QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF
+from PyQt6.QtGui import (
+    QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon, QPainterPath
+)
 
 from ..core.frame_info import FrameInfo, FrameType
 
@@ -138,35 +140,56 @@ class BarChartWidget(QWidget):
                 ])
                 painter.drawPolygon(triangle)
 
-        # Reference-frame markers for the selected frame (above the bars).
-        self._draw_ref_markers(painter, step, first, last)
+        # Reference-frame markers/arrows for the selected frame.
+        self._draw_ref_markers(painter, step, first, last, height)
 
         # Draw legend
         self._draw_legend(painter, rect)
 
     def _draw_ref_markers(self, painter: QPainter, step: int,
-                          first: int, last: int) -> None:
-        """Circled ref-index numbers over the selected frame's references:
-        L0 red, L1 green (matching Elecard)."""
-        if not self._ref_l0 and not self._ref_l1:
+                          first: int, last: int, height: int) -> None:
+        """Draw an arc + arrowhead from the selected frame to each reference
+        frame, with a circled ref-index number on the reference. L0 red,
+        L1 green (matching Elecard)."""
+        if (not self._ref_l0 and not self._ref_l1) or self._selected_index < 0:
             return
+        ay = 26  # anchor row for the arcs (below the circle row)
+        sel_x = 5 + self._selected_index * step + self._bar_width // 2
+        d = 13   # circle diameter
+
+        # Source dot on the selected frame.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 0))
+        painter.drawEllipse(sel_x - 3, ay - 3, 6, 6)
+
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
-        d = min(self._bar_width + 6, 14)  # marker diameter
-        for refs, color, row in (
-            (self._ref_l0, QColor(220, 40, 40), 0),
-            (self._ref_l1, QColor(40, 170, 60), 1),
-        ):
+        max_arc = max(14, height // 2 - 4)
+        for refs, color in ((self._ref_l0, QColor(220, 40, 40)),
+                            (self._ref_l1, QColor(40, 170, 60))):
             for ref_idx, frame_idx in enumerate(refs):
                 if not (first <= frame_idx <= last):
                     continue
-                cx = 5 + frame_idx * step + self._bar_width // 2
-                y = 2 + row * (d + 1)
-                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 220))
+                rx = 5 + frame_idx * step + self._bar_width // 2
+                arc_h = min(max_arc, 14 + abs(rx - sel_x) * 0.25)
+                path = QPainterPath(QPointF(sel_x, ay))
+                path.quadTo(QPointF((sel_x + rx) / 2, ay - arc_h),
+                            QPointF(rx, ay))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(color, 1.5))
+                painter.drawPath(path)
+                # Arrowhead at the reference, pointing down toward its bar.
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                painter.drawPolygon(QPolygon([
+                    QPoint(rx, ay + 6), QPoint(rx - 3, ay), QPoint(rx + 3, ay),
+                ]))
+                # Circled ref index above the arrowhead.
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 230))
                 painter.setPen(QPen(QColor(255, 255, 255), 1))
-                painter.drawEllipse(cx - d // 2, y, d, d)
-                painter.drawText(QRect(cx - d // 2, y, d, d),
+                painter.drawEllipse(rx - d // 2, ay - d - 3, d, d)
+                painter.drawText(QRect(rx - d // 2, ay - d - 3, d, d),
                                  Qt.AlignmentFlag.AlignCenter, str(ref_idx))
 
     def _draw_legend(self, painter: QPainter, rect: QRect) -> None:
