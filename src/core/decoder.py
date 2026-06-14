@@ -282,6 +282,8 @@ class Decoder:
             sc_index = self._index_to_display.get(frame_index, frame_index)
             if analysis.blocks is None:
                 analysis.blocks = self._block_sidecar.blocks_for(sc_index)
+            if analysis.pu is None:
+                analysis.pu = self._block_sidecar.pus_for(sc_index)
             if analysis.mvs is None:
                 analysis.mvs = self._block_sidecar.mvs_for(sc_index)
             if analysis.qp_grid is None:

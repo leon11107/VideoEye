@@ -84,23 +84,25 @@ def render_motion_vectors(painter: QPainter, analysis: FrameAnalysis) -> None:
         painter.drawPoints([QPointF(float(a), float(b)) for a, b in zip(cx, cy)])
 
 
-def render_partition(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Partition boundaries.
-
-    With full block data (patched backend): true coding-block tree.
-    Fallback: coding-unit grid plus inter sub-partition rectangles
-    derived from motion vector blocks.
-    """
+def _draw_rects(painter: QPainter, rects, color: QColor) -> None:
+    """Outline each (x, y, w, h) rectangle in a structured array."""
+    if rects is None or len(rects) == 0:
+        return
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(QPen(color, 1.0))
+    for x, y, w, h in zip(rects["x"], rects["y"], rects["w"], rects["h"]):
+        painter.drawRect(int(x), int(y), int(w), int(h))
 
+
+def render_part_cu(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Coding-unit boundaries (black). Falls back to the CU grid + MV blocks
+    when only the stock FFmpeg backend is available."""
     if analysis.blocks is not None and len(analysis.blocks) > 0:
-        painter.setPen(QPen(QColor(0, 0, 0), 1.0))  # Elecard-style black lines
-        b = analysis.blocks
-        for x, y, w, h in zip(b["x"], b["y"], b["w"], b["h"]):
-            painter.drawRect(int(x), int(y), int(w), int(h))
+        _draw_rects(painter, analysis.blocks, QColor(0, 0, 0))
         return
 
-    # Fallback path (stock FFmpeg backend)
+    # Fallback path (stock FFmpeg backend): CU grid + inter sub-partitions.
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     unit = analysis.qp_unit
     if analysis.qp_grid is not None:
         rows, cols = analysis.qp_grid.shape
@@ -109,12 +111,22 @@ def render_partition(painter: QPainter, analysis: FrameAnalysis) -> None:
         lines = [QLineF(c * unit, 0, c * unit, bottom) for c in range(cols + 1)]
         lines += [QLineF(0, r * unit, right, r * unit) for r in range(rows + 1)]
         painter.drawLines(lines)
+    _draw_rects(painter, analysis.mvs, QColor(0, 0, 0))
 
-    if analysis.mvs is not None and len(analysis.mvs) > 0:
-        painter.setPen(QPen(QColor(0, 0, 0), 1.0))
-        m = analysis.mvs
-        for x, y, w, h in zip(m["x"], m["y"], m["w"], m["h"]):
-            painter.drawRect(int(x), int(y), int(w), int(h))
+
+def render_part_pu(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Prediction-unit boundaries (blue)."""
+    _draw_rects(painter, analysis.pu, QColor(40, 120, 255))
+
+
+def render_part_tu_luma(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Luma transform-unit boundaries (red)."""
+    _draw_rects(painter, analysis.tu_luma, QColor(230, 40, 40))
+
+
+def render_part_tu_chroma(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Chroma transform-unit boundaries (red)."""
+    _draw_rects(painter, analysis.tu_chroma, QColor(230, 40, 40))
 
 
 def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
@@ -134,6 +146,12 @@ def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
 OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
     "mv": ("Motion Vectors", render_motion_vectors),
-    "partition": ("Partition", render_partition),
+    "part_cu": ("Partition: CU", render_part_cu),
+    "part_pu": ("Partition: PU", render_part_pu),
+    "part_tu_luma": ("Partition: TU (luma)", render_part_tu_luma),
+    "part_tu_chroma": ("Partition: TU (chroma)", render_part_tu_chroma),
     "types": ("Block Types", render_block_types),
 }
+
+# Partition overlays enabled by default (CU + PU; TU off until requested).
+DEFAULT_ON = ("part_cu", "part_pu")

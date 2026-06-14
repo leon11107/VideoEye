@@ -1,0 +1,347 @@
+diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
+index 7bb4fe9..0718d8d 100644
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -77,6 +77,7 @@ static void pic_arrays_free(HEVCLayerContext *l)
+ 
+     av_freep(&l->skip_flag);
+     av_freep(&l->tab_ct_depth);
++    av_freep(&l->tab_part_mode);
+ 
+     av_freep(&l->tab_ipm);
+     av_freep(&l->cbf_luma);
+@@ -117,9 +118,10 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
+     if (!l->sao || !l->deblock)
+         goto fail;
+ 
+-    l->skip_flag    = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
+-    l->tab_ct_depth = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
+-    if (!l->skip_flag || !l->tab_ct_depth)
++    l->skip_flag     = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
++    l->tab_ct_depth  = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
++    l->tab_part_mode = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
++    if (!l->skip_flag || !l->tab_ct_depth || !l->tab_part_mode)
+         goto fail;
+ 
+     l->cbf_luma = av_malloc_array(sps->min_tb_width, sps->min_tb_height);
+@@ -2316,6 +2318,22 @@ static av_always_inline void set_ct_depth(const HEVCSPS *sps, uint8_t *tab_ct_de
+                ct_depth, length);
+ }
+ 
++/* VideoEye: persist the CU's part_mode per min-CB so it can be exported with
++ * the block-info side data (the decoder otherwise keeps it only transiently). */
++static av_always_inline void set_part_mode(const HEVCSPS *sps, uint8_t *tab_part_mode,
++                                           int x0, int y0,
++                                           int log2_cb_size, int part_mode)
++{
++    int length = (1 << log2_cb_size) >> sps->log2_min_cb_size;
++    int x_cb   = x0 >> sps->log2_min_cb_size;
++    int y_cb   = y0 >> sps->log2_min_cb_size;
++    int y;
++
++    for (y = 0; y < length; y++)
++        memset(&tab_part_mode[(y_cb + y) * sps->min_cb_width + x_cb],
++               part_mode, length);
++}
++
+ static const uint8_t tab_mode_idx[] = {
+      0,  1,  2,  2,  2,  2,  3,  5,  7,  8, 10, 12, 13, 15, 17, 18, 19, 20,
+     21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31};
+@@ -2598,6 +2616,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+     }
+ 
+     set_ct_depth(sps, l->tab_ct_depth, x0, y0, log2_cb_size, lc->ct_depth);
++    set_part_mode(sps, l->tab_part_mode, x0, y0, log2_cb_size, lc->cu.part_mode);
+ 
+     return 0;
+ }
+@@ -3546,11 +3565,13 @@ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
+     if (l->sps && !s->avctx->hwaccel) {
+         const HEVCSPS *sps = l->sps;
+         AVFrame *vf = out->needs_fg ? out->frame_grain : out->f;
+-        const int8_t *pf = out->tab_mvf
+-            ? (const int8_t *)&out->tab_mvf[0].pred_flag : NULL;
++        static const VeyeMvFieldLayout mvf_layout = {
++            offsetof(MvField, mv[0]), offsetof(MvField, mv[1]),
++            offsetof(MvField, ref_idx), offsetof(MvField, pred_flag),
++        };
+         ff_veye_export_blockinfo_hevc(vf,
+-            l->skip_flag, l->tab_ct_depth, l->qp_y_tab,
+-            l->tab_ipm, l->is_pcm, pf, sizeof(MvField),
++            l->skip_flag, l->tab_ct_depth, l->tab_part_mode, l->qp_y_tab,
++            l->tab_ipm, l->is_pcm, out->tab_mvf, sizeof(MvField), &mvf_layout,
+             sps->min_cb_width, sps->min_cb_height, sps->min_pu_width,
+             sps->log2_min_cb_size, sps->log2_ctb_size, sps->log2_min_pu_size);
+     }
+diff --git a/libavcodec/hevc/hevcdec.h b/libavcodec/hevc/hevcdec.h
+index 911d5c3..a2f09de 100644
+--- a/libavcodec/hevc/hevcdec.h
++++ b/libavcodec/hevc/hevcdec.h
+@@ -466,6 +466,7 @@ typedef struct HEVCLayerContext {
+     //  CU
+     uint8_t                *skip_flag;
+     uint8_t                *tab_ct_depth;
++    uint8_t                *tab_part_mode; // VideoEye: PU part_mode per min-CB
+ 
+     // PU
+     uint8_t                *cbf_luma; // cbf_luma of colocated TU
+diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
+index 2d817c7..f5bc1ba 100644
+--- a/libavcodec/veye_blockinfo.c
++++ b/libavcodec/veye_blockinfo.c
+@@ -8,7 +8,10 @@
+ #include "libavutil/error.h"
+ #include "libavutil/frame.h"
+ 
++#include "libavcodec/codec_id.h"
++
+ #include "veye_blockinfo.h"
++#include "veye_aom_inspect.h"
+ 
+ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+                              const uint32_t *mb_type, const int8_t *qscale,
+@@ -110,11 +113,13 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+                                   const uint8_t *skip_flag,
+                                   const uint8_t *tab_ct_depth,
++                                  const uint8_t *tab_part_mode,
+                                   const int8_t  *qp_y_tab,
+                                   const uint8_t *tab_ipm,
+                                   const uint8_t *is_pcm,
+-                                  const int8_t  *mvf_pred_flag,
++                                  const void   *tab_mvf,
+                                   size_t mvf_elem_size,
++                                  const VeyeMvFieldLayout *mvf_layout,
+                                   int min_cb_width, int min_cb_height,
+                                   int min_pu_width,
+                                   int log2_min_cb_size, int log2_ctb_size,
+@@ -142,28 +147,112 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+             int y_pu  = y << cb_to_pu;
+             int pu    = x_pu + y_pu * min_pu_width;
+             int cu_log2 = log2_ctb_size - depth;
++            const char *mvf = NULL;
++            int8_t pf = 0;
+             int pred;
+ 
+             if (cu_log2 < log2_min_cb_size) cu_log2 = log2_min_cb_size;
+             if (cu_log2 > log2_ctb_size)    cu_log2 = log2_ctb_size;
+ 
++            if (tab_mvf && mvf_layout) {
++                mvf = (const char *)tab_mvf + (size_t)pu * mvf_elem_size;
++                pf  = *(const int8_t *)(mvf + mvf_layout->flag_off);
++            }
++
+             if (is_pcm && is_pcm[pu]) {
+                 pred = VEYE_PRED_IPCM;
+             } else if (skip_flag && skip_flag[cb]) {
+                 pred = VEYE_PRED_SKIP;
+             } else {
+-                int8_t pf = mvf_pred_flag
+-                    ? *(const int8_t *)((const char *)mvf_pred_flag
+-                                        + (size_t)pu * mvf_elem_size)
+-                    : 0;
+                 pred = (pf == 0) ? VEYE_PRED_INTRA : VEYE_PRED_INTER;
+             }
+ 
+             rec->cu_log2    = (uint8_t)cu_log2;
+             rec->pred       = (uint8_t)pred;
+             rec->intra_mode = tab_ipm ? tab_ipm[pu] : 0;
+-            rec->reserved   = 0;
++            rec->pred_flag  = (uint8_t)pf;
+             rec->qp         = qp_y_tab ? qp_y_tab[cb] : -1;
++
++            rec->mv0_x = rec->mv0_y = rec->mv1_x = rec->mv1_y = 0;
++            rec->ref0  = rec->ref1  = -1;
++            if (mvf) {
++                const int8_t *ref = (const int8_t *)(mvf + mvf_layout->ref_off);
++                if (pf & 1) {  /* PF_L0 */
++                    const int16_t *m =
++                        (const int16_t *)(mvf + mvf_layout->mv0_off);
++                    rec->mv0_x = m[0];
++                    rec->mv0_y = m[1];
++                    rec->ref0  = ref[0];
++                }
++                if (pf & 2) {  /* PF_L1 */
++                    const int16_t *m =
++                        (const int16_t *)(mvf + mvf_layout->mv1_off);
++                    rec->mv1_x = m[0];
++                    rec->mv1_y = m[1];
++                    rec->ref1  = ref[1];
++                }
++            }
++            rec->part_mode = tab_part_mode ? tab_part_mode[cb] : 0;
++            rec->reserved  = 0;
++            rec++;
++        }
++    }
++
++    return 0;
++}
++
++/* libaom: ref_frame[0] == INTRA_FRAME (0) marks an intra block; >= 1 is inter.
++ * NONE_FRAME is -1. */
++#define VEYE_AV1_INTRA_FRAME 0
++
++int ff_veye_export_blockinfo_av1(AVFrame *frame,
++                                 const struct veye_insp_frame_data *fd)
++{
++    VeyeBlockInfoHeader *hdr;
++    VeyeBlockRecordAV1 *rec;
++    AVFrameSideData *sd;
++    size_t n, size;
++    int x, y;
++
++    if (!frame || !fd || !fd->mi_grid || fd->mi_cols <= 0 || fd->mi_rows <= 0)
++        return 0;
++
++    n    = (size_t)fd->mi_cols * (size_t)fd->mi_rows;
++    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecordAV1);
++
++    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO, size);
++    if (!sd)
++        return AVERROR(ENOMEM);
++
++    hdr = (VeyeBlockInfoHeader *)sd->data;
++    hdr->magic       = VEYE_BI_MAGIC;
++    hdr->version     = VEYE_BI_VERSION;
++    hdr->record_size = (uint16_t)sizeof(VeyeBlockRecordAV1);
++    hdr->codec_id    = (uint32_t)AV_CODEC_ID_AV1;
++    hdr->grid_w      = (uint32_t)fd->mi_cols;
++    hdr->grid_h      = (uint32_t)fd->mi_rows;
++    hdr->block_unit  = 4;  /* MI_SIZE: each cell is a 4x4 luma block */
++    hdr->n_records   = (uint32_t)n;
++
++    rec = (VeyeBlockRecordAV1 *)(sd->data + sizeof(VeyeBlockInfoHeader));
++    for (y = 0; y < fd->mi_rows; y++) {
++        for (x = 0; x < fd->mi_cols; x++) {
++            const veye_insp_mi_data *mi = &fd->mi_grid[y * fd->mi_cols + x];
++            int inter = mi->ref_frame[0] > VEYE_AV1_INTRA_FRAME;
++
++            rec->bsize   = (uint8_t)mi->bsize;
++            rec->pred    = (uint8_t)(inter ? VEYE_PRED_INTER : VEYE_PRED_INTRA);
++            rec->mode    = (uint8_t)mi->mode;
++            rec->skip    = (uint8_t)mi->skip;
++            rec->qp      = mi->current_qindex;
++            rec->mv0_x   = mi->mv[0].col;
++            rec->mv0_y   = mi->mv[0].row;
++            rec->mv1_x   = mi->mv[1].col;
++            rec->mv1_y   = mi->mv[1].row;
++            rec->ref0    = (int8_t)mi->ref_frame[0];
++            rec->ref1    = (int8_t)mi->ref_frame[1];
++            rec->tx_size = (uint8_t)mi->tx_size;
++            rec->reserved = 0;
+             rec++;
+         }
+     }
+diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
+index eadfb7b..4cea04f 100644
+--- a/libavcodec/veye_blockinfo.h
++++ b/libavcodec/veye_blockinfo.h
+@@ -21,7 +21,7 @@
+ 
+ /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
+ #define VEYE_BI_MAGIC   0x4B424556u
+-#define VEYE_BI_VERSION 1
++#define VEYE_BI_VERSION 3
+ 
+ typedef struct VeyeBlockInfoHeader {
+     uint32_t magic;       ///< VEYE_BI_MAGIC
+@@ -39,6 +39,40 @@ typedef struct VeyeBlockRecord {
+     int32_t  qp;          ///< quantizer for the cell, or -1 if unknown
+ } VeyeBlockRecord;
+ 
++/*
++ * AV1 cells are emitted at min mode-info (4x4) granularity. A coding block
++ * spans a variable number of these cells per its bsize; the consumer collapses
++ * equal-block cells the way HEVC collapses by cu_log2. Dispatched on
++ * codec_id == AV1. QP carries libaom's per-block current_qindex (0..255);
++ * motion vectors are in 1/8-pel luma units (col=x, row=y).
++ */
++typedef struct VeyeBlockRecordAV1 {
++    uint8_t  bsize;       ///< libaom BLOCK_SIZE enum (0..BLOCK_SIZES_ALL-1)
++    uint8_t  pred;        ///< PredType: 1 intra, 2 inter (AV1 has no skip/pcm class)
++    uint8_t  mode;        ///< libaom PREDICTION_MODE
++    uint8_t  skip;        ///< skip_txfm flag (no residual)
++    int32_t  qp;          ///< current_qindex for the block (0..255)
++    int16_t  mv0_x;       ///< L0 motion vector, 1/8-pel luma
++    int16_t  mv0_y;
++    int16_t  mv1_x;       ///< L1 motion vector, 1/8-pel luma (compound only)
++    int16_t  mv1_y;
++    int8_t   ref0;        ///< ref_frame[0] (0=INTRA, 1..7 inter, -1 none)
++    int8_t   ref1;        ///< ref_frame[1] (-1 if single-reference)
++    uint8_t  tx_size;     ///< libaom TX_SIZE
++    uint8_t  reserved;
++} VeyeBlockRecordAV1;
++
++struct veye_insp_frame_data;
++
++/**
++ * Serialize a libaom inspection frame (4x4 MI grid) into
++ * AV_FRAME_DATA_VEYE_BLOCKINFO and attach it to @p frame. @p fd must already
++ * have been filled by ifd_inspect(). Returns 0 on success/skip,
++ * AVERROR(ENOMEM) on allocation failure.
++ */
++int ff_veye_export_blockinfo_av1(AVFrame *frame,
++                                 const struct veye_insp_frame_data *fd);
++
+ /*
+  * HEVC cells are emitted at min-CB (typically 8x8) granularity. Unlike the
+  * fixed-size H.264 macroblock, an HEVC coding unit spans a variable number
+@@ -49,8 +83,16 @@ typedef struct VeyeBlockRecordHEVC {
+     uint8_t  cu_log2;     ///< log2 of the luma CU size in pixels (3..6)
+     uint8_t  pred;        ///< PredType: 1 intra, 2 inter, 3 skip, 4 pcm
+     uint8_t  intra_mode;  ///< luma intra prediction mode 0..34 (intra only)
+-    uint8_t  reserved;
++    uint8_t  pred_flag;   ///< HEVC PredFlag: 0 intra, 1 L0, 2 L1, 3 BI
+     int32_t  qp;          ///< luma QP for the cell
++    int16_t  mv0_x;       ///< L0 motion vector, 1/4-pel luma (valid if PF_L0)
++    int16_t  mv0_y;
++    int16_t  mv1_x;       ///< L1 motion vector, 1/4-pel luma (valid if PF_L1)
++    int16_t  mv1_y;
++    int8_t   ref0;        ///< L0 reference index, -1 if unused
++    int8_t   ref1;        ///< L1 reference index, -1 if unused
++    uint8_t  part_mode;   ///< HEVC PartMode (0=2Nx2N,1=2NxN,2=Nx2N,3=NxN,4..7 AMP)
++    uint8_t  reserved;
+ } VeyeBlockRecordHEVC;
+ 
+ /**
+@@ -83,23 +125,34 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+  * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
+  * one is already attached, otherwise allocates a fresh one.
+  *
+- * @p mvf_pred_flag points at the pred_flag field of the frame's first
+- * MvField; @p mvf_elem_size is sizeof(MvField), so the field is sampled
+- * without this module depending on the HEVC struct layout. pred_flag == 0
+- * (PF_INTRA) marks an intra block.
++ * @p tab_mvf points at the frame's MvField array (one per min-PU); each
++ * record carries mv[2], ref_idx[2] and pred_flag. @p mvf_field_off gives the
++ * byte offsets of those members and @p mvf_elem_size is sizeof(MvField), so
++ * the motion field is read without this module depending on the HEVC struct
++ * layout. pred_flag == 0 (PF_INTRA) marks an intra block. Each min-CB samples
++ * the MvField of its top-left min-PU.
+  *
+  * All min-CB tables (skip_flag, tab_ct_depth, qp_y_tab) are strided by
+  * @p min_cb_width; the min-PU tables (tab_ipm, is_pcm, MvField) by
+  * @p min_pu_width. Returns 0 on success/skip, AVERROR(ENOMEM) on failure.
+  */
++typedef struct VeyeMvFieldLayout {
++    size_t mv0_off;   ///< offsetof(MvField, mv[0])  (Mv = {int16 x, int16 y})
++    size_t mv1_off;   ///< offsetof(MvField, mv[1])
++    size_t ref_off;   ///< offsetof(MvField, ref_idx) (int8_t[2])
++    size_t flag_off;  ///< offsetof(MvField, pred_flag) (int8_t)
++} VeyeMvFieldLayout;
++
+ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+                                   const uint8_t *skip_flag,
+                                   const uint8_t *tab_ct_depth,
++                                  const uint8_t *tab_part_mode,
+                                   const int8_t  *qp_y_tab,
+                                   const uint8_t *tab_ipm,
+                                   const uint8_t *is_pcm,
+-                                  const int8_t  *mvf_pred_flag,
++                                  const void   *tab_mvf,
+                                   size_t mvf_elem_size,
++                                  const VeyeMvFieldLayout *mvf_layout,
+                                   int min_cb_width, int min_cb_height,
+                                   int min_pu_width,
+                                   int log2_min_cb_size, int log2_ctb_size,

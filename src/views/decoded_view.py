@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea, QSizePoli
 from PyQt6.QtCore import Qt, QSize, QPoint, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QWheelEvent
 
-from .overlay import OVERLAYS
+from .overlay import OVERLAYS, DEFAULT_ON
 
 
 class _ImageLabel(QLabel):
@@ -68,7 +68,7 @@ class DecodedView(QWidget):
         self._pixmap = None          # composed (frame + overlays), native res
         self._rgb = None             # raw frame for recomposition
         self._analysis = None
-        self._overlay_flags = {key: False for key in OVERLAYS}
+        self._overlay_flags = {key: (key in DEFAULT_ON) for key in OVERLAYS}
         self._zoom_factor = 1.0
         self._fit_to_window = True
         self._frame_index = -1

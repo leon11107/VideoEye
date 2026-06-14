@@ -66,7 +66,11 @@ class FrameAnalysis:
 
     # Motion vectors (MV_DTYPE) and coding blocks (BLOCK_DTYPE).
     mvs: Optional[np.ndarray] = None
-    blocks: Optional[np.ndarray] = None
+    blocks: Optional[np.ndarray] = None     # coding units (CU)
+    # Partition sub-layers (BLOCK_DTYPE rectangles) for the partition overlay.
+    pu: Optional[np.ndarray] = None         # prediction units
+    tu_luma: Optional[np.ndarray] = None    # luma transform units (stage 2)
+    tu_chroma: Optional[np.ndarray] = None  # chroma transform units (stage 2)
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.

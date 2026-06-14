@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis import PredType, block_type_label, qp_field_name
-from .overlay import OVERLAYS
+from .overlay import OVERLAYS, DEFAULT_ON
 
 # Elecard-like section header coloring.
 _SECTION_BG = QColor("#2d5a88")
@@ -35,6 +35,7 @@ class BlockInfoView(QWidget):
         overlay_layout = QVBoxLayout(overlay_group)
         for key, (label, _render) in OVERLAYS.items():
             cb = QCheckBox(label)
+            cb.setChecked(key in DEFAULT_ON)  # before connect: no startup emit
             cb.toggled.connect(self._on_toggled)
             overlay_layout.addWidget(cb)
             self._checkboxes[key] = cb

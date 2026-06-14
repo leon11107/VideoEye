@@ -34,6 +34,7 @@ from .veye_sidecar import (
     blocks_from_frame,
     load_sidecar,
     mvs_from_frame,
+    pus_from_frame,
     qp_grid_from_frame,
     read_incremental,
 )
@@ -96,8 +97,10 @@ class BlockSidecar:
         with self._lock:
             self._total = total_frames
 
+        # The trailing tag is the sidecar record format; bump it whenever the
+        # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v3"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -260,6 +263,11 @@ class BlockSidecar:
         """MV_DTYPE motion vectors for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return mvs_from_frame(fb) if fb is not None else None
+
+    def pus_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """HEVC prediction-unit partitions for a frame, or None if not ready."""
+        fb = self._frame(frame_index)
+        return pus_from_frame(fb) if fb is not None else None
 
     def qp_grid_for(self, frame_index: int) -> Optional[np.ndarray]:
         """QP grid (int16, -1 = unknown) for a frame, or None if not ready."""

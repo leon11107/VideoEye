@@ -35,7 +35,7 @@ _REC_HEVC = np.dtype([
     ("cu_log2", "u1"), ("pred", "u1"), ("intra_mode", "u1"),
     ("pred_flag", "u1"), ("qp", "<i4"),
     ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
-    ("ref0", "i1"), ("ref1", "i1"), ("reserved", "<u2"),
+    ("ref0", "i1"), ("ref1", "i1"), ("part_mode", "u1"), ("reserved", "u1"),
 ])
 
 # VeyeBlockRecordAV1 (sidecar v2): u8 bsize, pred, mode, skip, i32 qp,
@@ -106,6 +106,7 @@ class VeyeFrameBlocks:
     pred: Optional[np.ndarray] = None       # HEVC: PredType per cell
     intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
     pred_flag: Optional[np.ndarray] = None  # HEVC: PredFlag (0/1/2/3 = I/L0/L1/BI)
+    part_mode: Optional[np.ndarray] = None  # HEVC: PartMode per cell (0..7)
     mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
     ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
     bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
@@ -241,6 +242,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             pred=recs["pred"].reshape(grid_h, grid_w).copy(),
             intra_mode=recs["intra_mode"].reshape(grid_h, grid_w).copy(),
             pred_flag=recs["pred_flag"].reshape(grid_h, grid_w).copy(),
+            part_mode=recs["part_mode"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
         )
 
@@ -352,6 +354,50 @@ def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
             if px % bw or py % bh:
                 continue  # not the top-left cell of this block
             out.append((px, py, bw, bh, 0, int(pred[my, mx]), int(mode[my, mx])))
+    return _pack(out, BLOCK_DTYPE)
+
+
+# HEVC PartMode -> PU rectangles as (fx, fy, fw, fh) fractions of the CU.
+_PART_PUS = {
+    0: ((0.0, 0.0, 1.0, 1.0),),                                      # 2Nx2N
+    1: ((0.0, 0.0, 1.0, 0.5), (0.0, 0.5, 1.0, 0.5)),                 # 2NxN
+    2: ((0.0, 0.0, 0.5, 1.0), (0.5, 0.0, 0.5, 1.0)),                 # Nx2N
+    3: ((0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 0.5, 0.5),
+        (0.0, 0.5, 0.5, 0.5), (0.5, 0.5, 0.5, 0.5)),                 # NxN
+    4: ((0.0, 0.0, 1.0, 0.25), (0.0, 0.25, 1.0, 0.75)),             # 2NxnU
+    5: ((0.0, 0.0, 1.0, 0.75), (0.0, 0.75, 1.0, 0.25)),             # 2NxnD
+    6: ((0.0, 0.0, 0.25, 1.0), (0.25, 0.0, 0.75, 1.0)),             # nLx2N
+    7: ((0.0, 0.0, 0.75, 1.0), (0.75, 0.0, 0.25, 1.0)),             # nRx2N
+}
+
+
+def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """HEVC prediction units (BLOCK_DTYPE rectangles) from CU size + part_mode.
+
+    Each CU (located at its top-left min-CB cell) is split into PUs per its
+    PartMode. For 2Nx2N the single PU coincides with the CU.
+    """
+    if (fb.codec_id != _CODEC_HEVC or fb.cu_log2 is None
+            or fb.part_mode is None):
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    unit = fb.block_unit
+    cu_log2 = fb.cu_log2
+    pm = fb.part_mode
+    pred = fb.pred
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            cl = int(cu_log2[my, mx])
+            cu_px = 1 << cl
+            px = mx * unit
+            if px % cu_px or py % cu_px:
+                continue  # not the CU's top-left cell
+            mode = int(pm[my, mx])
+            p = int(pred[my, mx]) if pred is not None else 0
+            for fx, fy, fw, fh in _PART_PUS.get(mode, _PART_PUS[0]):
+                out.append((px + int(fx * cu_px), py + int(fy * cu_px),
+                            int(fw * cu_px), int(fh * cu_px), 0, p, mode))
     return _pack(out, BLOCK_DTYPE)
 
 
