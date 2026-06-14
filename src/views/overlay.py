@@ -94,7 +94,7 @@ def _draw_rects(painter: QPainter, rects, color: QColor) -> None:
         painter.drawRect(int(x), int(y), int(w), int(h))
 
 
-def render_part_cu(painter: QPainter, analysis: FrameAnalysis) -> None:
+def _draw_cu(painter: QPainter, analysis: FrameAnalysis) -> None:
     """Coding-unit boundaries (black). Falls back to the CU grid + MV blocks
     when only the stock FFmpeg backend is available."""
     if analysis.blocks is not None and len(analysis.blocks) > 0:
@@ -114,19 +114,24 @@ def render_part_cu(painter: QPainter, analysis: FrameAnalysis) -> None:
     _draw_rects(painter, analysis.mvs, QColor(0, 0, 0))
 
 
-def render_part_pu(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Prediction-unit boundaries (blue)."""
-    _draw_rects(painter, analysis.pu, QColor(40, 120, 255))
-
-
-def render_part_tu_luma(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Luma transform-unit boundaries (red)."""
-    _draw_rects(painter, analysis.tu_luma, QColor(230, 40, 40))
-
-
-def render_part_tu_chroma(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Chroma transform-unit boundaries (red)."""
-    _draw_rects(painter, analysis.tu_chroma, QColor(230, 40, 40))
+def render_partition(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
+    """Partition overlay. CU (black) is the base; PU (blue) and TU (red) are
+    refinements drawn on top of it -- they never appear without CU. PU/TU are
+    drawn first and CU last, so CU edges stay black while only the finer
+    PU/TU splits show in their own colour.
+    """
+    pu = flags.get("part_pu")
+    tl = flags.get("part_tu_luma")
+    tc = flags.get("part_tu_chroma")
+    if not (flags.get("part_cu") or pu or tl or tc):
+        return
+    if pu:
+        _draw_rects(painter, analysis.pu, QColor(40, 120, 255))
+    if tl:
+        _draw_rects(painter, analysis.tu_luma, QColor(230, 40, 40))
+    if tc:
+        _draw_rects(painter, analysis.tu_chroma, QColor(230, 40, 40))
+    _draw_cu(painter, analysis)  # CU base, on top so its edges read as black
 
 
 def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
@@ -142,16 +147,24 @@ def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
             painter.fillRect(int(x), int(y), int(w), int(h), color)
 
 
-# Overlay registry: key -> (label, render function)
+# Flat overlay registry: key -> (label, render function). Each is rendered
+# independently. The partition layers are handled separately (render_partition)
+# because they compose (CU base + PU/TU refinements) rather than stack.
 OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
     "mv": ("Motion Vectors", render_motion_vectors),
-    "part_cu": ("Partition: CU", render_part_cu),
-    "part_pu": ("Partition: PU", render_part_pu),
-    "part_tu_luma": ("Partition: TU (luma)", render_part_tu_luma),
-    "part_tu_chroma": ("Partition: TU (chroma)", render_part_tu_chroma),
     "types": ("Block Types", render_block_types),
 }
 
-# Partition overlays enabled by default (CU + PU; TU off until requested).
+# Partition sub-layers shown under a collapsible "Partition" menu. CU is the
+# base; PU/TU build on it. key -> checkbox label.
+PARTITION_LAYERS = (
+    ("part_cu", "CU"),
+    ("part_pu", "PU"),
+    ("part_tu_luma", "TU (luma)"),
+    ("part_tu_chroma", "TU (chroma)"),
+)
+
+# Every overlay flag key (flat + partition), and which start enabled.
+ALL_OVERLAY_KEYS = tuple(OVERLAYS) + tuple(k for k, _ in PARTITION_LAYERS)
 DEFAULT_ON = ("part_cu", "part_pu")

@@ -2,15 +2,15 @@
 hierarchical name|value table for the block under the cursor."""
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QGroupBox, QLabel, QTreeWidget, QTreeWidgetItem,
+    QCheckBox, QGroupBox, QLabel, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget
 )
 
 from ..analysis import PredType, block_type_label, qp_field_name
-from .overlay import OVERLAYS, DEFAULT_ON
+from .overlay import OVERLAYS, DEFAULT_ON, PARTITION_LAYERS
 
 # Elecard-like section header coloring.
 _SECTION_BG = QColor("#2d5a88")
@@ -39,6 +39,30 @@ class BlockInfoView(QWidget):
             cb.toggled.connect(self._on_toggled)
             overlay_layout.addWidget(cb)
             self._checkboxes[key] = cb
+
+        # Collapsible "Partition" menu: click to expand and pick CU/PU/TU.
+        self._part_btn = QToolButton()
+        self._part_btn.setText("Partition")
+        self._part_btn.setCheckable(True)
+        self._part_btn.setStyleSheet("QToolButton { border: none; }")
+        self._part_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._part_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self._part_btn.toggled.connect(self._on_partition_expand)
+        overlay_layout.addWidget(self._part_btn)
+
+        self._part_container = QWidget()
+        part_layout = QVBoxLayout(self._part_container)
+        part_layout.setContentsMargins(16, 0, 0, 0)  # indent under the header
+        for key, label in PARTITION_LAYERS:
+            cb = QCheckBox(label)
+            cb.setChecked(key in DEFAULT_ON)
+            cb.toggled.connect(self._on_toggled)
+            part_layout.addWidget(cb)
+            self._checkboxes[key] = cb
+        self._part_container.setVisible(False)  # hidden until expanded
+        overlay_layout.addWidget(self._part_container)
+
         layout.addWidget(overlay_group)
 
         stats_group = QGroupBox("Frame Statistics")
@@ -67,6 +91,11 @@ class BlockInfoView(QWidget):
         layout.addWidget(block_group, stretch=1)
 
         self._set_tree_placeholder("Hover over the frame")
+
+    def _on_partition_expand(self, expanded: bool):
+        self._part_container.setVisible(expanded)
+        self._part_btn.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
 
     def _on_toggled(self):
         self.overlays_changed.emit(self.overlay_flags())
