@@ -23,16 +23,19 @@ _PRED_COLORS = {
 
 def render_qp_map(painter: QPainter, analysis: FrameAnalysis) -> None:
     """Elecard-style opaque grayscale QP map: each block a solid gray shade
-    by its QP (low QP dark, high QP bright). Covers the picture like Elecard's
-    QP map view rather than tinting it. Unknown blocks stay transparent."""
+    by its QP (low QP bright/white, high QP dark). Covers the picture like
+    Elecard's QP map view rather than tinting it. Unknown blocks stay
+    transparent."""
     grid = analysis.qp_grid
     if grid is None:
         return
     rows, cols = grid.shape
-    # Normalize the codec's QP range to 0..255 grey: AV1 carries qindex
-    # (0..255), H.264/HEVC a 0..51 QP. qp_max maps to white.
+    # Normalize the codec's QP range to 0..255 grey, inverted so low QP (high
+    # quality) is white and high QP is black, matching Elecard. AV1 carries
+    # qindex (0..255), H.264/HEVC a 0..51 QP.
     qp_max = analysis.qp_max or QP_MAX
-    gray = np.clip(grid.astype(np.float32) * (255.0 / qp_max), 0, 255).astype(np.uint8)
+    norm = np.clip(grid.astype(np.float32) * (255.0 / qp_max), 0, 255)
+    gray = (255.0 - norm).astype(np.uint8)
     rgba = np.empty((rows, cols, 4), dtype=np.uint8)
     rgba[..., 0] = gray
     rgba[..., 1] = gray
