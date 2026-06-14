@@ -586,12 +586,16 @@ class MainWindow(QMainWindow):
         # The decoder is opened after this pass (see _load_file), so it builds
         # its order maps from the now poc-bearing frame list automatically.
 
-    def _select_frame(self, index: int):
+    def _select_frame(self, index: int, immediate: bool = False):
         """Select and display a frame.
 
         During playback only the decoded view and barchart are updated
         (NALU parsing + hex are skipped for speed). They refresh when
         playback pauses.
+
+        immediate=True decodes synchronously (used for playback, so frames are
+        shown in order and paced by the play timer rather than sampled by the
+        async worker). Interactive selection uses the worker for responsiveness.
         """
         if not self._demuxer.is_open:
             return
@@ -616,9 +620,23 @@ class MainWindow(QMainWindow):
             f"{frame.size:,} bytes"
         )
 
-        # Decode the picture (and its block analysis) off the UI thread; the
-        # latest request wins so rapid scrubbing stays responsive.
-        if self._decoder.is_open:
+        if not self._decoder.is_open:
+            return
+
+        if immediate:
+            # Synchronous decode for smooth, in-order, timer-paced playback.
+            self._decode_lock.lock()
+            try:
+                rgb = self._decoder.decode_frame(index)
+                analysis = self._decoder.get_analysis(index) if rgb is not None else None
+            finally:
+                self._decode_lock.unlock()
+            if rgb is not None:
+                self._decoded_view.display_frame(rgb, index, analysis)
+                self._block_info_view.set_analysis(analysis)
+        else:
+            # Interactive: decode off the UI thread; latest request wins so
+            # rapid scrubbing stays responsive.
             self._decode_worker.request(index)
 
     def _on_frame_decoded(self, index: int, rgb, analysis):
@@ -733,7 +751,7 @@ class MainWindow(QMainWindow):
         current = self._barchart_view.selected_index
         total = len(self._demuxer.frames)
         if current < total - 1:
-            self._select_frame(current + 1)
+            self._select_frame(current + 1, immediate=True)
         else:
             # Reached the end, stop
             self._pause_playback()
