@@ -21,18 +21,25 @@ class BitstreamReader:
 
     @staticmethod
     def remove_emulation_prevention(data: bytes) -> bytes:
-        """Remove emulation prevention bytes (0x03 after 0x0000)."""
-        result = bytearray()
-        i = 0
-        while i < len(data):
-            if i + 2 < len(data) and data[i] == 0 and data[i+1] == 0 and data[i+2] == 3:
-                result.append(data[i])
-                result.append(data[i+1])
-                i += 3  # Skip the 0x03
-            else:
-                result.append(data[i])
-                i += 1
-        return bytes(result)
+        """Remove emulation prevention bytes (0x03 in a 00 00 03 sequence).
+
+        Scans for the 3-byte pattern with bytes.find (C speed) and keeps the
+        slices between hits, instead of copying byte-by-byte in Python -- the
+        old approach cost millions of appends on a 1-2 MB intra-frame NALU.
+        The no-emulation case returns the original bytes with zero copying.
+        """
+        if b"\x00\x00\x03" not in data:
+            return data
+        out = bytearray()
+        start = 0
+        while True:
+            idx = data.find(b"\x00\x00\x03", start)
+            if idx == -1:
+                out += data[start:]
+                break
+            out += data[start:idx + 2]  # keep the 00 00, drop the 03
+            start = idx + 3
+        return bytes(out)
 
     def bits_remaining(self) -> int:
         """Return number of bits remaining."""
