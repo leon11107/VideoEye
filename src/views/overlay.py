@@ -115,21 +115,18 @@ def _draw_cu(painter: QPainter, analysis: FrameAnalysis) -> None:
 
 
 def render_partition(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
-    """Partition overlay. CU (black) is the base; PU (blue) and TU (red) are
-    refinements drawn on top of it -- they never appear without CU. PU/TU are
-    drawn first and CU last, so CU edges stay black while only the finer
-    PU/TU splits show in their own colour.
+    """Partition overlay. Enabling partition always draws CU (black) as the
+    base; PU (blue) and TU (red) are optional refinements layered on top.
+    PU/TU are drawn first and CU last, so CU edges stay black while only the
+    finer PU/TU splits show in their own colour.
     """
-    pu = flags.get("part_pu")
-    tl = flags.get("part_tu_luma")
-    tc = flags.get("part_tu_chroma")
-    if not (flags.get("part_cu") or pu or tl or tc):
+    if not flags.get(PARTITION_KEY):
         return
-    if pu:
+    if flags.get("part_pu"):
         _draw_rects(painter, analysis.pu, QColor(40, 120, 255))
-    if tl:
+    if flags.get("part_tu_luma"):
         _draw_rects(painter, analysis.tu_luma, QColor(230, 40, 40))
-    if tc:
+    if flags.get("part_tu_chroma"):
         _draw_rects(painter, analysis.tu_chroma, QColor(230, 40, 40))
     _draw_cu(painter, analysis)  # CU base, on top so its edges read as black
 
@@ -156,15 +153,18 @@ OVERLAYS = {
     "types": ("Block Types", render_block_types),
 }
 
-# Partition sub-layers shown under a collapsible "Partition" menu. CU is the
-# base; PU/TU build on it. key -> checkbox label.
+# Master flag: enabling partition always draws CU. PARTITION_LAYERS are the
+# optional refinements revealed when the partition menu is expanded (CU is not
+# listed -- it is implied by the master being on). key -> checkbox label.
+PARTITION_KEY = "partition"
 PARTITION_LAYERS = (
-    ("part_cu", "CU"),
     ("part_pu", "PU"),
     ("part_tu_luma", "TU (luma)"),
     ("part_tu_chroma", "TU (chroma)"),
 )
 
-# Every overlay flag key (flat + partition), and which start enabled.
-ALL_OVERLAY_KEYS = tuple(OVERLAYS) + tuple(k for k, _ in PARTITION_LAYERS)
-DEFAULT_ON = ("part_cu", "part_pu")
+# Every overlay flag key (flat + partition master + layers), and the defaults.
+ALL_OVERLAY_KEYS = (
+    tuple(OVERLAYS) + (PARTITION_KEY,) + tuple(k for k, _ in PARTITION_LAYERS)
+)
+DEFAULT_ON = (PARTITION_KEY, "part_pu")

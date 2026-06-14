@@ -5,12 +5,12 @@ import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QGroupBox, QLabel, QToolButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget
+    QCheckBox, QGroupBox, QHBoxLayout, QLabel, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
 from ..analysis import PredType, block_type_label, qp_field_name
-from .overlay import OVERLAYS, DEFAULT_ON, PARTITION_LAYERS
+from .overlay import OVERLAYS, DEFAULT_ON, PARTITION_KEY, PARTITION_LAYERS
 
 # Elecard-like section header coloring.
 _SECTION_BG = QColor("#2d5a88")
@@ -40,20 +40,27 @@ class BlockInfoView(QWidget):
             overlay_layout.addWidget(cb)
             self._checkboxes[key] = cb
 
-        # Collapsible "Partition" menu: click to expand and pick CU/PU/TU.
+        # Partition: a master checkbox (enabling it always draws CU) plus an
+        # expand arrow that reveals the PU/TU refinement options.
+        part_row = QHBoxLayout()
+        part_row.setContentsMargins(0, 0, 0, 0)
         self._part_btn = QToolButton()
-        self._part_btn.setText("Partition")
         self._part_btn.setCheckable(True)
         self._part_btn.setStyleSheet("QToolButton { border: none; }")
-        self._part_btn.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._part_btn.setArrowType(Qt.ArrowType.RightArrow)
         self._part_btn.toggled.connect(self._on_partition_expand)
-        overlay_layout.addWidget(self._part_btn)
+        part_master = QCheckBox("Partition")
+        part_master.setChecked(PARTITION_KEY in DEFAULT_ON)
+        part_master.toggled.connect(self._on_toggled)
+        self._checkboxes[PARTITION_KEY] = part_master
+        part_row.addWidget(self._part_btn)
+        part_row.addWidget(part_master)
+        part_row.addStretch()
+        overlay_layout.addLayout(part_row)
 
         self._part_container = QWidget()
         part_layout = QVBoxLayout(self._part_container)
-        part_layout.setContentsMargins(16, 0, 0, 0)  # indent under the header
+        part_layout.setContentsMargins(28, 0, 0, 0)  # indent under "Partition"
         for key, label in PARTITION_LAYERS:
             cb = QCheckBox(label)
             cb.setChecked(key in DEFAULT_ON)
@@ -61,6 +68,9 @@ class BlockInfoView(QWidget):
             part_layout.addWidget(cb)
             self._checkboxes[key] = cb
         self._part_container.setVisible(False)  # hidden until expanded
+        # PU/TU options are only meaningful when partition is on.
+        self._part_container.setEnabled(part_master.isChecked())
+        part_master.toggled.connect(self._part_container.setEnabled)
         overlay_layout.addWidget(self._part_container)
 
         layout.addWidget(overlay_group)
