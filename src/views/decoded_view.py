@@ -1,11 +1,22 @@
 """Decoded frame display view with block-analysis overlays."""
 
+import copy
+
 import numpy as np
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea, QSizePolicy
-from PyQt6.QtCore import Qt, QSize, QPoint, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QWheelEvent
+from PyQt6.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent
 
-from .overlay import OVERLAYS, DEFAULT_ON, ALL_OVERLAY_KEYS, render_partition
+from .overlay import (
+    OVERLAYS, DEFAULT_ON, ALL_OVERLAY_KEYS,
+    render_partition, render_motion_vectors, render_block_types,
+)
+
+# All partition layers on -- used for the always-on hover inspection overlay.
+_HOVER_FLAGS = {
+    "partition": True, "part_pu": True,
+    "part_tu_luma": True, "part_tu_chroma": True,
+}
 
 
 class _ImageLabel(QLabel):
@@ -22,6 +33,16 @@ class _ImageLabel(QLabel):
         self.setMouseTracking(True)
         self._panning = False
         self._pan_last = QPoint()
+        self._hover_paint = None  # callable(painter): draws the hover overlay
+
+    def paintEvent(self, event):
+        super().paintEvent(event)  # draws the scaled frame pixmap
+        if self._hover_paint is not None:
+            painter = QPainter(self)
+            try:
+                self._hover_paint(painter)
+            finally:
+                painter.end()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -72,7 +93,9 @@ class DecodedView(QWidget):
         self._zoom_factor = 1.0
         self._fit_to_window = True
         self._frame_index = -1
+        self._hover_region = None  # QRect (native px) of the LCU/MB under cursor
         self._setup_ui()
+        self._image_label._hover_paint = self._draw_hover
 
     def _setup_ui(self):
         """Set up the UI layout."""
@@ -99,9 +122,7 @@ class DecodedView(QWidget):
         self._image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._image_label.setStyleSheet("background-color: #1a1a1a;")
         self._image_label.mouse_moved.connect(self._on_mouse_moved)
-        self._image_label.mouse_left.connect(
-            lambda: self.block_hovered.emit(None)
-        )
+        self._image_label.mouse_left.connect(self._on_mouse_left)
         self._image_label.panned.connect(self._on_panned)
         self._image_label.zoom_requested.connect(self._on_zoom_requested)
 
@@ -197,6 +218,82 @@ class DecodedView(QWidget):
             "block": a.block_at(px, py),
         }
         self.block_hovered.emit(info)
+
+        # Always draw the hovered LCU/MB region's partition/MV/type on the
+        # canvas, independent of the overlay toggles. Repaint only when the
+        # region (not every pixel) changes.
+        region = self._lcu_region(px, py)
+        if region != self._hover_region:
+            self._hover_region = region
+            self._image_label.update()
+
+    def _lcu_region(self, px: int, py: int) -> QRect:
+        """The LCU/MB cell (native px) containing (px, py): 16 for H.264, 64
+        for HEVC/AV1."""
+        codec = (self._analysis.codec or "").lower()
+        size = 16 if codec in ("h264", "avc") else 64
+        rx = (px // size) * size
+        ry = (py // size) * size
+        w = min(size, self._pixmap.width() - rx)
+        h = min(size, self._pixmap.height() - ry)
+        return QRect(rx, ry, w, h)
+
+    def _on_mouse_left(self) -> None:
+        self.block_hovered.emit(None)
+        if self._hover_region is not None:
+            self._hover_region = None
+            self._image_label.update()
+
+    def _draw_hover(self, painter: QPainter) -> None:
+        """Paint partition (CU/PU/TU) + MV + type for the hovered LCU/MB,
+        clipped to that region, on top of the displayed frame. Runs regardless
+        of the overlay toggles so hovering always reveals the region's coding
+        structure."""
+        if (self._analysis is None or self._hover_region is None
+                or self._pixmap is None):
+            return
+        shown = self._image_label.pixmap()
+        if shown is None or shown.width() == 0 or self._pixmap.width() == 0:
+            return
+        sx = shown.width() / self._pixmap.width()
+        sy = shown.height() / self._pixmap.height()
+        r = self._hover_region
+
+        # Restrict analysis arrays to the region so the renderers iterate only
+        # a handful of blocks per hover (cheap), then clip for clean edges.
+        region_an = self._region_analysis(r)
+
+        painter.save()
+        painter.scale(sx, sy)
+        painter.setClipRect(r)
+        render_block_types(painter, region_an)
+        render_partition(painter, region_an, _HOVER_FLAGS)
+        render_motion_vectors(painter, region_an)
+        painter.setClipping(False)
+        # Outline the inspected region.
+        painter.setPen(QPen(QColor(255, 255, 0, 200), 1.0))
+        painter.drawRect(r)
+        painter.restore()
+
+    def _region_analysis(self, r: QRect):
+        """A shallow copy of the analysis with block/MV arrays filtered to the
+        rectangle r (native px)."""
+        a = self._analysis
+
+        def clip(arr):
+            if arr is None or len(arr) == 0:
+                return arr
+            m = ((arr["x"] < r.x() + r.width()) & (arr["x"] + arr["w"] > r.x())
+                 & (arr["y"] < r.y() + r.height()) & (arr["y"] + arr["h"] > r.y()))
+            return arr[m]
+
+        ra = copy.copy(a)
+        ra.blocks = clip(a.blocks)
+        ra.pu = clip(a.pu)
+        ra.tu_luma = clip(a.tu_luma)
+        ra.tu_chroma = clip(a.tu_chroma)
+        ra.mvs = clip(a.mvs)
+        return ra
 
     def _update_display(self) -> None:
         """Update the displayed image based on current zoom/fit settings."""
@@ -327,5 +424,6 @@ class DecodedView(QWidget):
         self._rgb = None
         self._analysis = None
         self._frame_index = -1
+        self._hover_region = None
         self._image_label.clear()
         self._info_label.setText("No frame loaded")
