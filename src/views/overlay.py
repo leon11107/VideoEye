@@ -13,20 +13,6 @@ from ..analysis import FrameAnalysis, PredType
 
 QP_MAX = 63  # covers H.264/HEVC (51) and leaves headroom for AV1 mapping
 
-
-def _qp_color_lut() -> np.ndarray:
-    """RGBA LUT: low QP = blue/green (good quality), high QP = red."""
-    lut = np.zeros((QP_MAX + 1, 4), dtype=np.uint8)
-    t = np.linspace(0.0, 1.0, QP_MAX + 1)
-    lut[:, 0] = np.clip(np.interp(t, [0.0, 0.5, 1.0], [0, 255, 255]), 0, 255)
-    lut[:, 1] = np.clip(np.interp(t, [0.0, 0.5, 1.0], [180, 255, 0]), 0, 255)
-    lut[:, 2] = np.clip(np.interp(t, [0.0, 0.5, 1.0], [255, 0, 0]), 0, 255)
-    lut[:, 3] = 110
-    return lut
-
-
-_QP_LUT = _qp_color_lut()
-
 _PRED_COLORS = {
     PredType.INTRA: QColor(255, 64, 64, 90),
     PredType.INTER: QColor(64, 110, 255, 90),
@@ -35,17 +21,23 @@ _PRED_COLORS = {
 }
 
 
-def render_qp_heatmap(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Semi-transparent per-block QP heatmap."""
+def render_qp_map(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Elecard-style opaque grayscale QP map: each block a solid gray shade
+    by its QP (low QP dark, high QP bright). Covers the picture like Elecard's
+    QP map view rather than tinting it. Unknown blocks stay transparent."""
     grid = analysis.qp_grid
     if grid is None:
         return
     rows, cols = grid.shape
-    # Normalize the codec's QP range onto the LUT: AV1 carries qindex
-    # (0..255), H.264/HEVC a 0..51 QP. qp_max maps to the hottest color.
+    # Normalize the codec's QP range to 0..255 grey: AV1 carries qindex
+    # (0..255), H.264/HEVC a 0..51 QP. qp_max maps to white.
     qp_max = analysis.qp_max or QP_MAX
-    idx = np.clip(grid.astype(np.float32) * (QP_MAX / qp_max), 0, QP_MAX)
-    rgba = _QP_LUT[idx.astype(np.int32)]
+    gray = np.clip(grid.astype(np.float32) * (255.0 / qp_max), 0, 255).astype(np.uint8)
+    rgba = np.empty((rows, cols, 4), dtype=np.uint8)
+    rgba[..., 0] = gray
+    rgba[..., 1] = gray
+    rgba[..., 2] = gray
+    rgba[..., 3] = 255  # opaque, like Elecard's QP map view
     rgba[grid < 0] = 0  # unknown blocks fully transparent
 
     rgba = np.ascontiguousarray(rgba)
@@ -99,7 +91,7 @@ def render_partition(painter: QPainter, analysis: FrameAnalysis) -> None:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     if analysis.blocks is not None and len(analysis.blocks) > 0:
-        painter.setPen(QPen(QColor(255, 255, 255, 140), 1.0))
+        painter.setPen(QPen(QColor(0, 0, 0), 1.0))  # Elecard-style black lines
         b = analysis.blocks
         for x, y, w, h in zip(b["x"], b["y"], b["w"], b["h"]):
             painter.drawRect(int(x), int(y), int(w), int(h))
@@ -109,14 +101,14 @@ def render_partition(painter: QPainter, analysis: FrameAnalysis) -> None:
     unit = analysis.qp_unit
     if analysis.qp_grid is not None:
         rows, cols = analysis.qp_grid.shape
-        painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
+        painter.setPen(QPen(QColor(0, 0, 0, 120), 1.0))
         right, bottom = cols * unit, rows * unit
         lines = [QLineF(c * unit, 0, c * unit, bottom) for c in range(cols + 1)]
         lines += [QLineF(0, r * unit, right, r * unit) for r in range(rows + 1)]
         painter.drawLines(lines)
 
     if analysis.mvs is not None and len(analysis.mvs) > 0:
-        painter.setPen(QPen(QColor(255, 255, 255, 130), 1.0))
+        painter.setPen(QPen(QColor(0, 0, 0), 1.0))
         m = analysis.mvs
         for x, y, w, h in zip(m["x"], m["y"], m["w"], m["h"]):
             painter.drawRect(int(x), int(y), int(w), int(h))
@@ -137,7 +129,7 @@ def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
 
 # Overlay registry: key -> (label, render function)
 OVERLAYS = {
-    "qp": ("QP Heatmap", render_qp_heatmap),
+    "qp": ("QP Map", render_qp_map),
     "mv": ("Motion Vectors", render_motion_vectors),
     "partition": ("Partition", render_partition),
     "types": ("Block Types", render_block_types),
