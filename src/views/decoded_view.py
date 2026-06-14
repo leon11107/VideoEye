@@ -9,18 +9,48 @@ from .overlay import OVERLAYS
 
 
 class _ImageLabel(QLabel):
-    """Image label reporting mouse position for block inspection."""
+    """Image label: reports mouse position for block inspection, and supports
+    wheel-zoom and left-drag panning of the decoded view."""
 
     mouse_moved = pyqtSignal(QPoint)
     mouse_left = pyqtSignal()
+    panned = pyqtSignal(int, int)            # mouse movement dx, dy while dragging
+    zoom_requested = pyqtSignal(int, QPoint)  # wheel delta, cursor pos in label
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._panning = False
+        self._pan_last = QPoint()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._panning = True
+            self._pan_last = event.globalPosition().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        self.mouse_moved.emit(event.position().toPoint())
+        if self._panning:
+            g = event.globalPosition().toPoint()
+            move = g - self._pan_last
+            self._pan_last = g
+            self.panned.emit(move.x(), move.y())
+        else:
+            self.mouse_moved.emit(event.position().toPoint())
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._panning:
+            self._panning = False
+            self.unsetCursor()
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        # Plain wheel zooms (toward the cursor); consume so the scroll area
+        # does not also scroll.
+        self.zoom_requested.emit(event.angleDelta().y(), event.position().toPoint())
+        event.accept()
 
     def leaveEvent(self, event):
         self.mouse_left.emit()
@@ -55,9 +85,12 @@ class DecodedView(QWidget):
         self._info_label.setStyleSheet("background-color: #333; color: #ccc; padding: 4px;")
         layout.addWidget(self._info_label)
 
-        # Scroll area for the image
+        # Scroll area for the image. Not widget-resizable: we size the label to
+        # the scaled pixmap ourselves so that zooming past the viewport produces
+        # scrollbars (and thus something to pan). The label is centered when it
+        # is smaller than the viewport (fit / zoomed-out).
         self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Image display label
@@ -69,6 +102,8 @@ class DecodedView(QWidget):
         self._image_label.mouse_left.connect(
             lambda: self.block_hovered.emit(None)
         )
+        self._image_label.panned.connect(self._on_panned)
+        self._image_label.zoom_requested.connect(self._on_zoom_requested)
 
         self._scroll.setWidget(self._image_label)
         layout.addWidget(self._scroll)
@@ -230,17 +265,54 @@ class DecodedView(QWidget):
                 f"Frame {self._frame_index} | {width}x{height} | Zoom: {mode}"
             )
 
+    def _on_panned(self, dx: int, dy: int) -> None:
+        """Pan the view by dragging: move the scrollbars opposite to the drag
+        so the grabbed point follows the cursor."""
+        h = self._scroll.horizontalScrollBar()
+        v = self._scroll.verticalScrollBar()
+        h.setValue(h.value() - dx)
+        v.setValue(v.value() - dy)
+
+    def _on_zoom_requested(self, delta: int, label_pos: QPoint) -> None:
+        """Wheel zoom keeping the content point under the cursor fixed."""
+        if self._pixmap is None:
+            return
+        shown = self._image_label.pixmap()
+        if shown is None or shown.width() == 0 or shown.height() == 0:
+            (self.zoom_in if delta > 0 else self.zoom_out)()
+            return
+
+        h = self._scroll.horizontalScrollBar()
+        v = self._scroll.verticalScrollBar()
+        # Cursor position within the viewport, and the content fraction under it.
+        vx = label_pos.x() - h.value()
+        vy = label_pos.y() - v.value()
+        fx = label_pos.x() / shown.width()
+        fy = label_pos.y() / shown.height()
+
+        # Leaving fit mode: start from the current on-screen scale so the first
+        # wheel step is continuous rather than jumping to 125% of native.
+        if self._fit_to_window:
+            self._zoom_factor = shown.width() / self._pixmap.width()
+            self._fit_to_window = False
+
+        (self.zoom_in if delta > 0 else self.zoom_out)()
+
+        new_shown = self._image_label.pixmap()
+        if new_shown is None or new_shown.width() == 0:
+            return
+        # Re-pin the same content fraction to the same viewport position.
+        h.setValue(int(fx * new_shown.width() - vx))
+        v.setValue(int(fy * new_shown.height() - vy))
+
     def wheelEvent(self, event: QWheelEvent):
-        """Handle mouse wheel for zooming."""
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self.zoom_in()
-            else:
-                self.zoom_out()
-            event.accept()
+        """Wheel over the surrounding area (not the image) also zooms."""
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom_in()
         else:
-            super().wheelEvent(event)
+            self.zoom_out()
+        event.accept()
 
     def resizeEvent(self, event):
         """Handle resize to update fit-to-window display."""
