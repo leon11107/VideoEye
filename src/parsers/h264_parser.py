@@ -4,6 +4,7 @@ from typing import Optional
 from collections import OrderedDict
 
 from .nalu_parser import NALUnit, H264NaluType
+from ._common import read_sei_payload_header
 from ..utils.bitstream_reader import BitstreamReader
 
 
@@ -287,21 +288,7 @@ class H264Parser:
         reader = BitstreamReader.from_rbsp(nalu.data[1:])
 
         try:
-            # Read payload type
-            payload_type = 0
-            while True:
-                byte = reader.read_u(8)
-                payload_type += byte
-                if byte != 255:
-                    break
-
-            # Read payload size
-            payload_size = 0
-            while True:
-                byte = reader.read_u(8)
-                payload_size += byte
-                if byte != 255:
-                    break
+            payload_type, payload_size = read_sei_payload_header(reader)
 
             sei_types = {
                 0: "buffering_period",
