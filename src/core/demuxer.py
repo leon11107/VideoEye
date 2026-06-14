@@ -28,6 +28,9 @@ class Demuxer:
         self._reader_stream = None
         self._reader_iter = None
         self._reader_pos: int = -1  # Last frame index read by reader
+        # Persistent file handle for O(1) byte-offset packet reads (raw
+        # streams, where a packet's bytes are exactly file[pos:pos+size]).
+        self._byte_reader = None
 
     def open(self, file_path: str,
              progress_cb: Optional[Callable[[str, int, int], None]] = None) -> bool:
@@ -78,6 +81,12 @@ class Demuxer:
                 pass
         self._reader = None
         self._reader_stream = None
+        if self._byte_reader is not None:
+            try:
+                self._byte_reader.close()
+            except Exception:
+                pass
+        self._byte_reader = None
 
         if self._container:
             try:
@@ -142,6 +151,12 @@ class Demuxer:
         use_dts = frame.dts is not None
         seek_ts = frame.dts if use_dts else frame.pts
         if seek_ts is None:
+            # Raw elementary stream: no timestamps to seek by. The packet
+            # bytes are exactly file[pos:pos+size], so read them directly in
+            # O(1) instead of re-parsing the whole stream from the start.
+            data = self._read_packet_at(frame)
+            if data:
+                return data
             return self._reader_ordinal_scan(frame_index)
 
         try:
@@ -164,6 +179,29 @@ class Demuxer:
         self._reader_iter = None
         self._reader_pos = -1
         return b''
+
+    def _read_packet_at(self, frame: FrameInfo) -> bytes:
+        """Read a packet's bytes directly by byte offset (O(1)).
+
+        For raw elementary streams a packet on disk is contiguous, so its
+        bytes are exactly file[pos : pos+size] -- identical to bytes(packet).
+        Returns b'' when no offset was recorded so the caller can fall back
+        to an ordinal scan.
+        """
+        if frame.pos is None or frame.size <= 0:
+            return b''
+        try:
+            if self._byte_reader is None:
+                self._byte_reader = open(self._file_path, "rb")
+            self._byte_reader.seek(frame.pos)
+            data = self._byte_reader.read(frame.size)
+            # A byte read does not advance the demux iterator; force the next
+            # access back through this path rather than the sequential one.
+            self._reader_iter = None
+            self._reader_pos = -1
+            return data
+        except Exception:
+            return b''
 
     def _reader_ordinal_scan(self, frame_index: int) -> bytes:
         """Reopen the reader and scan to the Nth packet (unseekable input)."""
