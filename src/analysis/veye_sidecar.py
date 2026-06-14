@@ -305,8 +305,20 @@ def _pack(out: list, dtype) -> np.ndarray:
     return np.array(out, dtype=dtype)
 
 
+def _mb_pred(t: int) -> int:
+    """Prediction class of an H.264 macroblock from its mb_type bitmask."""
+    if t & MB_TYPE_INTRA_PCM:
+        return PredType.IPCM
+    if t & _MB_TYPE_INTRA:
+        return PredType.INTRA
+    if t & MB_TYPE_SKIP:
+        return PredType.SKIP
+    return PredType.INTER
+
+
 def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
-    """Decode a frame's per-cell grid into BLOCK_DTYPE partitions."""
+    """Coding units (BLOCK_DTYPE). For H.264 the CU is the 16x16 macroblock;
+    its prediction-partition split is the PU (see pus_from_frame)."""
     if fb.codec_id == _CODEC_HEVC:
         return _blocks_from_hevc(fb)
     if fb.codec_id == _CODEC_AV1:
@@ -316,11 +328,10 @@ def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     out: list[tuple] = []
     mb = fb.mb_type
     for my in range(fb.grid_h):
+        py = my * unit
         for mx in range(fb.grid_w):
             t = int(mb[my, mx])
-            bx, by = mx * unit, my * unit
-            for x, y, w, h, shape, pred in _partition(t, bx, by, unit):
-                out.append((x, y, w, h, 0, pred, shape))
+            out.append((mx * unit, py, unit, unit, 0, _mb_pred(t), 0))
     return _pack(out, BLOCK_DTYPE)
 
 
@@ -391,14 +402,32 @@ _PART_PUS = {
 }
 
 
-def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
-    """HEVC prediction units (BLOCK_DTYPE rectangles) from CU size + part_mode.
+def _h264_pus(fb: VeyeFrameBlocks) -> np.ndarray:
+    """H.264 prediction units: the macroblock partition rectangles
+    (16x16 / 16x8 / 8x16 / 8x8 and intra/PCM), decoded from mb_type."""
+    if fb.mb_type is None:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    unit = fb.block_unit
+    mb = fb.mb_type
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        for mx in range(fb.grid_w):
+            t = int(mb[my, mx])
+            bx, by = mx * unit, my * unit
+            for x, y, w, h, shape, pred in _partition(t, bx, by, unit):
+                out.append((x, y, w, h, 0, pred, shape))
+    return _pack(out, BLOCK_DTYPE)
 
-    Each CU (located at its top-left min-CB cell) is split into PUs per its
-    PartMode. For 2Nx2N the single PU coincides with the CU.
+
+def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Prediction units (BLOCK_DTYPE rectangles).
+
+    HEVC: each CU is split into PUs per its PartMode (2Nx2N's single PU
+    coincides with the CU). H.264: the macroblock's partition rectangles.
     """
-    if (fb.codec_id != _CODEC_HEVC or fb.cu_log2 is None
-            or fb.part_mode is None):
+    if fb.codec_id != _CODEC_HEVC:
+        return _h264_pus(fb)
+    if fb.cu_log2 is None or fb.part_mode is None:
         return np.empty(0, dtype=BLOCK_DTYPE)
     unit = fb.block_unit
     cu_log2 = fb.cu_log2
