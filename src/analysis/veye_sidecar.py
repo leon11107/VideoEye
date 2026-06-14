@@ -30,6 +30,10 @@ _BLK_HDR = struct.Struct("<IHHIIIII")
 # v4 HEVC: appended after the records -> u32 tu_grid_w, tu_grid_h, tu_unit,
 # then tu_grid_w*tu_grid_h u8 luma-TU log2 sizes (0 = none, use CU size).
 _TU_HDR = struct.Struct("<III")
+# v5 HEVC: appended after the TU grid -> i32 own_poc, nb_l0, nb_l1, then
+# 16 i32 L0 ref POCs and 16 i32 L1 ref POCs.
+_MAX_REFS = 16
+_REF_HDR = struct.Struct("<iii%di%di" % (_MAX_REFS, _MAX_REFS))
 # VeyeBlockRecord (H.264): u32 mb_type, i32 qp
 _REC = np.dtype([("mb_type", "<u4"), ("qp", "<i4")])
 # VeyeBlockRecordHEVC (sidecar v2): u8 cu_log2, u8 pred, u8 intra_mode,
@@ -112,6 +116,9 @@ class VeyeFrameBlocks:
     part_mode: Optional[np.ndarray] = None  # HEVC: PartMode per cell (0..7)
     tu_log2: Optional[np.ndarray] = None    # HEVC: luma TU log2 per min-TB (0=none)
     tu_unit: int = 0                        # HEVC: pixels per min-TB cell
+    own_poc: Optional[int] = None           # HEVC: this frame's POC (v5)
+    ref_l0: tuple = ()                      # HEVC: L0 reference POCs
+    ref_l1: tuple = ()                      # HEVC: L1 reference POCs
     mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
     ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
     bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
@@ -242,8 +249,12 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         ref[..., 1] = recs["ref1"].reshape(grid_h, grid_w)
 
         # v4: luma TU-size grid appended after the records (min-TB granularity).
+        # v5: reference section appended after the TU grid.
         tu_log2 = None
         tu_unit = 0
+        own_poc = None
+        ref_l0: tuple = ()
+        ref_l1: tuple = ()
         if _ver >= 4:
             tu_off = _BLK_HDR.size + n_records * _REC_HEVC.itemsize
             if len(payload) >= tu_off + _TU_HDR.size:
@@ -253,6 +264,15 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                     tu_log2 = np.frombuffer(
                         payload, dtype=np.uint8, count=tw * th, offset=g_off
                     ).reshape(th, tw).copy()
+                ref_off = g_off + tw * th
+                if _ver >= 5 and len(payload) >= ref_off + _REF_HDR.size:
+                    vals = _REF_HDR.unpack_from(payload, ref_off)
+                    own_poc = vals[0]
+                    nb_l0, nb_l1 = vals[1], vals[2]
+                    l0 = vals[3:3 + _MAX_REFS]
+                    l1 = vals[3 + _MAX_REFS:3 + 2 * _MAX_REFS]
+                    ref_l0 = tuple(l0[:max(0, nb_l0)])
+                    ref_l1 = tuple(l1[:max(0, nb_l1)])
 
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
@@ -263,6 +283,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             pred_flag=recs["pred_flag"].reshape(grid_h, grid_w).copy(),
             part_mode=recs["part_mode"].reshape(grid_h, grid_w).copy(),
             tu_log2=tu_log2, tu_unit=tu_unit,
+            own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
             mv=mv, ref_idx=ref,
         )
 

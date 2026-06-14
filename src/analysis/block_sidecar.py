@@ -75,6 +75,9 @@ class BlockSidecar:
         self._thread: Optional[threading.Thread] = None
         self._proc: Optional[subprocess.Popen] = None
         self._stopping = False
+        # Cached POC -> sidecar-index map for reference resolution.
+        self._poc_map: dict[int, list[int]] = {}
+        self._poc_map_n = -1
 
     @property
     def available(self) -> bool:
@@ -102,7 +105,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v4"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v5"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -270,6 +273,33 @@ class BlockSidecar:
         """HEVC prediction-unit partitions for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return pus_from_frame(fb) if fb is not None else None
+
+    def refs_for(self, sc_index: int):
+        """Reference frames of a frame, as (l0_indices, l1_indices) in sidecar
+        (display) order. Resolves each reference POC to the frame carrying it
+        (nearest in display order when a POC repeats across GOPs). None if not
+        ready or the codec carries no reference info."""
+        fb = self._frame(sc_index)
+        if fb is None or fb.own_poc is None:
+            return None
+        with self._lock:
+            if self._poc_map_n != len(self._frames):  # rebuild when frames grow
+                self._poc_map = {}
+                for i, f in self._frames.items():
+                    if f.own_poc is not None:
+                        self._poc_map.setdefault(f.own_poc, []).append(i)
+                self._poc_map_n = len(self._frames)
+            by_poc = self._poc_map
+
+        def resolve(pocs):
+            out = []
+            for p in pocs:
+                cands = by_poc.get(p)
+                if cands:
+                    out.append(min(cands, key=lambda i: abs(i - sc_index)))
+            return out
+
+        return resolve(fb.ref_l0), resolve(fb.ref_l1)
 
     def tu_luma_for(self, frame_index: int) -> Optional[np.ndarray]:
         """HEVC luma transform-unit partitions, or None if not ready."""

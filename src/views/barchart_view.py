@@ -28,15 +28,29 @@ class BarChartWidget(QWidget):
         self._max_frame_size = 1
         self._selected_index = -1
         self._hover_index = -1
+        # Reference frames of the selected frame (decode-order indices), per
+        # list; marked on the chart with circled ref-index numbers.
+        self._ref_l0: list[int] = []
+        self._ref_l1: list[int] = []
 
         self.setMouseTracking(True)
         self.setMinimumHeight(100)
+
+    def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
+        """Mark the selected frame's L0 (blue) / L1 (green) reference frames."""
+        if l0 == self._ref_l0 and l1 == self._ref_l1:
+            return
+        self._ref_l0 = list(l0)
+        self._ref_l1 = list(l1)
+        self.update()
 
     def set_frames(self, frames: list[FrameInfo]) -> None:
         """Set frame data for visualization."""
         self._frames = frames
         self._selected_index = -1
         self._hover_index = -1
+        self._ref_l0 = []
+        self._ref_l1 = []
 
         if frames:
             self._max_frame_size = max(f.size for f in frames)
@@ -124,8 +138,36 @@ class BarChartWidget(QWidget):
                 ])
                 painter.drawPolygon(triangle)
 
+        # Reference-frame markers for the selected frame (above the bars).
+        self._draw_ref_markers(painter, step, first, last)
+
         # Draw legend
         self._draw_legend(painter, rect)
+
+    def _draw_ref_markers(self, painter: QPainter, step: int,
+                          first: int, last: int) -> None:
+        """Circled ref-index numbers over the selected frame's references:
+        L0 red, L1 green (matching Elecard)."""
+        if not self._ref_l0 and not self._ref_l1:
+            return
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        d = min(self._bar_width + 6, 14)  # marker diameter
+        for refs, color, row in (
+            (self._ref_l0, QColor(220, 40, 40), 0),
+            (self._ref_l1, QColor(40, 170, 60), 1),
+        ):
+            for ref_idx, frame_idx in enumerate(refs):
+                if not (first <= frame_idx <= last):
+                    continue
+                cx = 5 + frame_idx * step + self._bar_width // 2
+                y = 2 + row * (d + 1)
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 220))
+                painter.setPen(QPen(QColor(255, 255, 255), 1))
+                painter.drawEllipse(cx - d // 2, y, d, d)
+                painter.drawText(QRect(cx - d // 2, y, d, d),
+                                 Qt.AlignmentFlag.AlignCenter, str(ref_idx))
 
     def _draw_legend(self, painter: QPainter, rect: QRect) -> None:
         """Draw frame type legend (no-op, legend is a separate widget now)."""
@@ -269,6 +311,10 @@ class BarChartView(QWidget):
     def set_frames(self, frames: list[FrameInfo]) -> None:
         """Set frame data for visualization."""
         self._chart.set_frames(frames)
+
+    def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
+        """Mark the selected frame's L0/L1 reference frames on the chart."""
+        self._chart.set_ref_markers(l0, l1)
 
     def select_frame(self, index: int) -> None:
         """Select a frame and scroll to make it visible."""

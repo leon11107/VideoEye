@@ -547,8 +547,14 @@ class MainWindow(QMainWindow):
         self._current_index = index
         frame = frames[index]
 
-        # Update bar chart selection
+        # Update bar chart selection + mark this frame's reference frames.
         self._barchart_view.select_frame(index)
+        if self._decoder.is_open:
+            refs = self._decoder.refs_for(index)
+            if refs is not None:
+                self._barchart_view.set_ref_markers(refs[0], refs[1])
+            else:
+                self._barchart_view.set_ref_markers([], [])
 
         # NALU/hex views are cheap and independent of decoding; update them
         # immediately for instant feedback. Skip during playback.

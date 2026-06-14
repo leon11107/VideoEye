@@ -108,6 +108,7 @@ class Decoder:
         # rank. Built at open from the demuxer frame list.
         self._pts_to_index: dict[int, int] = {}
         self._index_to_display: dict[int, int] = {}
+        self._display_to_index: Optional[dict[int, int]] = None  # lazy inverse
         # Raw streams have no pts: _emit_order lists decode indices in the
         # decoder's output (display) order, derived from POC. _emit_ptr walks
         # it as frames are emitted. None when POC is unavailable (then
@@ -234,6 +235,7 @@ class Decoder:
         self._keyframe_pos.clear()
         self._pts_to_index.clear()
         self._index_to_display.clear()
+        self._display_to_index = None
         self._emit_order = None
         self._emit_ptr = 0
         self._seq_buffer = []
@@ -298,6 +300,24 @@ class Decoder:
                     if unit:
                         analysis.qp_unit = unit
         return analysis
+
+    def refs_for(self, frame_index: int):
+        """Reference frames of frame_index (decode order), as
+        (l0_indices, l1_indices) in decode order, or None if unavailable."""
+        if self._block_sidecar is None:
+            return None
+        sc_index = self._index_to_display.get(frame_index, frame_index)
+        r = self._block_sidecar.refs_for(sc_index)
+        if r is None:
+            return None
+        # sidecar indices are display order; map back to decode order.
+        if not self._index_to_display:
+            return list(r[0]), list(r[1])
+        if self._display_to_index is None:
+            self._display_to_index = {d: i for i, d in self._index_to_display.items()}
+        inv = self._display_to_index
+        conv = lambda lst: [inv.get(d, d) for d in lst]
+        return conv(r[0]), conv(r[1])
 
     def analysis_progress(self) -> tuple[int, Optional[int], str]:
         """Block-analysis generation progress: (ready, total, status).
@@ -650,6 +670,7 @@ class Decoder:
         self._index_to_display = {
             idx: rank for rank, (_key, idx) in enumerate(ordered)
         }
+        self._display_to_index = None  # invalidate lazy inverse
 
     @property
     def hw_accel(self) -> str:
