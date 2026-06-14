@@ -103,12 +103,11 @@ class DecodeWorker(QThread):
             finally:
                 self._lock.unlock()
 
-            # Drop this result if a newer frame was already requested.
-            self._mutex.lock()
-            superseded = self._pending >= 0
-            self._mutex.unlock()
-            if not superseded:
-                self.ready.emit(index, rgb, analysis)
+            # Always emit the decoded frame. The worker only ever decodes the
+            # latest pending request (intermediate ones are overwritten before
+            # it picks them up), so emissions are already near-current; during
+            # playback this delivers every decoded frame for real-time display.
+            self.ready.emit(index, rgb, analysis)
 
 
 class MainWindow(QMainWindow):
@@ -623,9 +622,14 @@ class MainWindow(QMainWindow):
             self._decode_worker.request(index)
 
     def _on_frame_decoded(self, index: int, rgb, analysis):
-        """Receive a decoded frame from the worker (UI thread via signal)."""
-        if index != self._current_index or rgb is None:
-            return  # stale result for a frame the user already moved past
+        """Receive a decoded frame from the worker (UI thread via signal).
+
+        Displayed whatever the index: the worker only decodes the latest
+        request, so during playback this shows each frame in real time, and
+        when the user settles on a frame the final emission is that frame.
+        """
+        if rgb is None:
+            return
         self._decoded_view.display_frame(rgb, index, analysis)
         self._block_info_view.set_analysis(analysis)
 
