@@ -53,8 +53,8 @@ class BlockInfoView(QWidget):
         part_master.setChecked(PARTITION_KEY in DEFAULT_ON)
         part_master.toggled.connect(self._on_toggled)
         self._checkboxes[PARTITION_KEY] = part_master
-        part_row.addWidget(self._part_btn)
         part_row.addWidget(part_master)
+        part_row.addWidget(self._part_btn)
         part_row.addStretch()
         overlay_layout.addLayout(part_row)
 

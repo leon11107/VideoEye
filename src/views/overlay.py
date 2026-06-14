@@ -163,8 +163,10 @@ PARTITION_LAYERS = (
     ("part_tu_chroma", "TU (chroma)"),
 )
 
-# Every overlay flag key (flat + partition master + layers), and the defaults.
+# Every overlay flag key (flat + partition master + layers). Partition is OFF
+# by default; when the user enables it, PU is pre-selected (CU is implied), so
+# part_pu starts checked even though the master starts unchecked.
 ALL_OVERLAY_KEYS = (
     tuple(OVERLAYS) + (PARTITION_KEY,) + tuple(k for k, _ in PARTITION_LAYERS)
 )
-DEFAULT_ON = (PARTITION_KEY, "part_pu")
+DEFAULT_ON = ("part_pu",)
