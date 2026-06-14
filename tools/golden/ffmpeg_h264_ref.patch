@@ -1,0 +1,86 @@
+diff --git a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
+index f5d2b31..19b2824 100644
+--- a/libavcodec/h264_picture.c
++++ b/libavcodec/h264_picture.c
+@@ -88,6 +88,9 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+     memcpy(dst->ref_poc,   src->ref_poc,   sizeof(src->ref_poc));
+     memcpy(dst->ref_count, src->ref_count, sizeof(src->ref_count));
+ 
++    memcpy(dst->veye_ref_poc,   src->veye_ref_poc,   sizeof(src->veye_ref_poc));
++    memcpy(dst->veye_ref_count, src->veye_ref_count, sizeof(src->veye_ref_count));
++
+     dst->poc           = src->poc;
+     dst->frame_num     = src->frame_num;
+     dst->mmco_reset    = src->mmco_reset;
+diff --git a/libavcodec/h264_refs.c b/libavcodec/h264_refs.c
+index 74840e5..1f32df8 100644
+--- a/libavcodec/h264_refs.c
++++ b/libavcodec/h264_refs.c
+@@ -420,6 +420,23 @@ int ff_h264_build_ref_list(H264Context *h, H264SliceContext *sl)
+     if (FRAME_MBAFF(h))
+         h264_fill_mbaff_ref_list(sl);
+ 
++    /* VEYE: snapshot this slice's reference-list POCs onto the current picture
++     * so the block-info exporter can emit per-frame reference relationships at
++     * output time (the per-slice ref lists are gone by then). The last slice of
++     * the picture wins, matching the HEVC exporter's last-slice approximation. */
++    if (h->cur_pic_ptr) {
++        for (int list = 0; list < 2; list++) {
++            int n = (list < sl->list_count) ? sl->ref_count[list] : 0;
++            if (n > 32)
++                n = 32;
++            h->cur_pic_ptr->veye_ref_count[list] = n;
++            for (int index = 0; index < n; index++)
++                h->cur_pic_ptr->veye_ref_poc[list][index] =
++                    sl->ref_list[list][index].parent
++                        ? sl->ref_list[list][index].parent->poc : 0;
++        }
++    }
++
+     return 0;
+ }
+ 
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index ea51b37..f1ac1f9 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -972,9 +972,23 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+                                  out->mb_width, out->mb_height, out->mb_stride, 1);
+         }
+ 
+-        ff_veye_export_blockinfo(dst, AV_CODEC_ID_H264,
+-                                 out->mb_type, out->qscale_table,
+-                                 out->mb_width, out->mb_height, out->mb_stride, 16);
++        {
++            int32_t l0_poc[16], l1_poc[16];
++            int nb_l0 = out->veye_ref_count[0];
++            int nb_l1 = out->veye_ref_count[1];
++            int vi;
++            if (nb_l0 > 16) nb_l0 = 16;
++            if (nb_l1 > 16) nb_l1 = 16;
++            for (vi = 0; vi < nb_l0; vi++)
++                l0_poc[vi] = out->veye_ref_poc[0][vi];
++            for (vi = 0; vi < nb_l1; vi++)
++                l1_poc[vi] = out->veye_ref_poc[1][vi];
++            ff_veye_export_blockinfo(dst, AV_CODEC_ID_H264,
++                                     out->mb_type, out->qscale_table,
++                                     out->poc, l0_poc, nb_l0, l1_poc, nb_l1,
++                                     out->mb_width, out->mb_height,
++                                     out->mb_stride, 16);
++        }
+     }
+ 
+     return 0;
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 1df9901..f391ee9 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -141,6 +141,8 @@ typedef struct H264Picture {
+     int long_ref;           ///< 1->long term reference 0->short term reference
+     int ref_poc[2][2][32];  ///< POCs of the frames/fields used as reference (FIXME need per slice)
+     int ref_count[2][2];    ///< number of entries in ref_poc         (FIXME need per slice)
++    int veye_ref_poc[2][32];///< VEYE: per-frame L0/L1 reference POCs (last slice's ref lists)
++    int veye_ref_count[2];  ///< VEYE: number of valid entries in veye_ref_poc[list]
+     int mbaff;              ///< 1 -> MBAFF frame 0-> not MBAFF
+     int field_picture;      ///< whether or not picture was encoded in separate fields
+ 

@@ -311,10 +311,26 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
 
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,
                          offset=_BLK_HDR.size)
+    # v5 (H.264): reference section appended right after the records, mirroring
+    # the HEVC layout (no TU grid for H.264).
+    own_poc = None
+    ref_l0: tuple = ()
+    ref_l1: tuple = ()
+    if _ver >= 5:
+        ref_off = _BLK_HDR.size + n_records * _REC.itemsize
+        if len(payload) >= ref_off + _REF_HDR.size:
+            vals = _REF_HDR.unpack_from(payload, ref_off)
+            own_poc = vals[0]
+            nb_l0, nb_l1 = vals[1], vals[2]
+            l0 = vals[3:3 + _MAX_REFS]
+            l1 = vals[3 + _MAX_REFS:3 + 2 * _MAX_REFS]
+            ref_l0 = tuple(l0[:max(0, nb_l0)])
+            ref_l1 = tuple(l1[:max(0, nb_l1)])
     return VeyeFrameBlocks(
         codec_id, grid_w, grid_h, block_unit,
         qp=recs["qp"].reshape(grid_h, grid_w).copy(),
         mb_type=recs["mb_type"].reshape(grid_h, grid_w).copy(),
+        own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
     )
 
 
