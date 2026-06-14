@@ -141,55 +141,63 @@ class BarChartWidget(QWidget):
                 painter.drawPolygon(triangle)
 
         # Reference-frame markers/arrows for the selected frame.
-        self._draw_ref_markers(painter, step, first, last, height)
+        self._draw_ref_markers(painter, step, first, last, height, available_height)
 
         # Draw legend
         self._draw_legend(painter, rect)
 
-    def _draw_ref_markers(self, painter: QPainter, step: int,
-                          first: int, last: int, height: int) -> None:
-        """Draw an arc + arrowhead from the selected frame to each reference
-        frame, with a circled ref-index number on the reference. L0 red,
-        L1 green (matching Elecard)."""
-        if (not self._ref_l0 and not self._ref_l1) or self._selected_index < 0:
-            return
-        ay = 26  # anchor row for the arcs (below the circle row)
-        sel_x = 5 + self._selected_index * step + self._bar_width // 2
-        d = 13   # circle diameter
+    def _bar_top(self, i: int, height: int, available_height: int) -> int:
+        """Y of the top of frame i's bar (the marker anchors just above it)."""
+        bh = max(2, int(self._frames[i].size / self._max_frame_size * available_height))
+        return height - bh - 10
 
-        # Source dot on the selected frame.
+    def _draw_ref_markers(self, painter: QPainter, step: int, first: int,
+                          last: int, height: int, available_height: int) -> None:
+        """For the selected frame, arc to each reference frame and place a
+        circled ref-index right above that frame's bar, with a short tick
+        connecting the circle to the bar so the target is unambiguous.
+        L0 red, L1 green."""
+        sel = self._selected_index
+        if (not self._ref_l0 and not self._ref_l1) or sel < 0:
+            return
+        d = 13  # circle diameter
+
+        def marker_y(i):  # circle-center y, just above the bar (clamped on top)
+            return max(d, self._bar_top(i, height, available_height) - 6)
+
+        sel_x = 5 + sel * step + self._bar_width // 2
+        sel_y = marker_y(sel)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 0))
-        painter.drawEllipse(sel_x - 3, ay - 3, 6, 6)
+        painter.drawEllipse(sel_x - 3, sel_y - 3, 6, 6)
 
         font = painter.font()
         font.setPointSize(7)
         painter.setFont(font)
-        max_arc = max(14, height // 2 - 4)
         for refs, color in ((self._ref_l0, QColor(220, 40, 40)),
                             (self._ref_l1, QColor(40, 170, 60))):
-            for ref_idx, frame_idx in enumerate(refs):
-                if not (first <= frame_idx <= last):
+            for ref_idx, fidx in enumerate(refs):
+                if not (first <= fidx <= last):
                     continue
-                rx = 5 + frame_idx * step + self._bar_width // 2
-                arc_h = min(max_arc, 14 + abs(rx - sel_x) * 0.25)
-                path = QPainterPath(QPointF(sel_x, ay))
-                path.quadTo(QPointF((sel_x + rx) / 2, ay - arc_h),
-                            QPointF(rx, ay))
+                rx = 5 + fidx * step + self._bar_width // 2
+                ry = marker_y(fidx)
+                btop = self._bar_top(fidx, height, available_height)
+                # Tick from the circle down onto the referenced bar.
+                painter.setPen(QPen(color, 1))
+                painter.drawLine(rx, ry + d // 2, rx, btop)
+                # Arc from the selected frame to this reference's circle.
+                lift = min(28, 12 + abs(rx - sel_x) * 0.18)
+                cy = min(sel_y, ry) - lift
+                path = QPainterPath(QPointF(sel_x, sel_y))
+                path.quadTo(QPointF((sel_x + rx) / 2, cy), QPointF(rx, ry))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(color, 1.5))
+                painter.setPen(QPen(color, 1.3))
                 painter.drawPath(path)
-                # Arrowhead at the reference, pointing down toward its bar.
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(color)
-                painter.drawPolygon(QPolygon([
-                    QPoint(rx, ay + 6), QPoint(rx - 3, ay), QPoint(rx + 3, ay),
-                ]))
-                # Circled ref index above the arrowhead.
-                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 230))
+                # Circled ref index sitting right above the bar.
+                painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
                 painter.setPen(QPen(QColor(255, 255, 255), 1))
-                painter.drawEllipse(rx - d // 2, ay - d - 3, d, d)
-                painter.drawText(QRect(rx - d // 2, ay - d - 3, d, d),
+                painter.drawEllipse(rx - d // 2, ry - d // 2, d, d)
+                painter.drawText(QRect(rx - d // 2, ry - d // 2, d, d),
                                  Qt.AlignmentFlag.AlignCenter, str(ref_idx))
 
     def _draw_legend(self, painter: QPainter, rect: QRect) -> None:
@@ -219,6 +227,11 @@ class BarChartWidget(QWidget):
             for i in (old, index):
                 if i >= 0:
                     self.update(self._bar_rect(i))
+            # Reference arcs span across columns; a partial bar repaint would
+            # erase segments crossing it. Repaint the (local) arc region too.
+            rb = self._ref_bounds()
+            if rb is not None:
+                self.update(rb)
 
             # Show tooltip with frame info
             if index >= 0 and index < len(self._frames):
@@ -235,6 +248,18 @@ class BarChartWidget(QWidget):
         """Handle mouse leaving widget."""
         self._hover_index = -1
         self.update()
+
+    def _ref_bounds(self) -> QRect:
+        """Bounding rect (full height) covering the selected frame and its
+        reference markers/arcs, or None when there are no markers."""
+        if (not self._ref_l0 and not self._ref_l1) or self._selected_index < 0:
+            return None
+        step = self._bar_width + self._bar_spacing
+        idxs = [self._selected_index, *self._ref_l0, *self._ref_l1]
+        xs = [5 + i * step for i in idxs if i >= 0]
+        x0 = min(xs) - 8
+        x1 = max(xs) + self._bar_width + 8
+        return QRect(x0, 0, x1 - x0, self.height())
 
     def _bar_rect(self, index: int) -> QRect:
         """Full-height repaint rect for one bar (covers its selection border
