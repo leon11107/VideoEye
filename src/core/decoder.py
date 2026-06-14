@@ -114,6 +114,10 @@ class Decoder:
         # emission order is assumed to equal decode order).
         self._emit_order: Optional[list[int]] = None
         self._emit_ptr: int = 0
+        # Sequential (display-order) playback state: a buffer of frames already
+        # pulled from a packet, and the display rank to start emitting from.
+        self._seq_buffer: list = []
+        self._seq_skip_until_display: int = 0
         # Active demux iterator (kept alive for sequential access)
         self._packet_iter = None
         # LRU cache: frame_index -> (rgb array, FrameAnalysis or None)
@@ -232,6 +236,8 @@ class Decoder:
         self._index_to_display.clear()
         self._emit_order = None
         self._emit_ptr = 0
+        self._seq_buffer = []
+        self._seq_skip_until_display = 0
         self._decode_pos = -1
         self._run_kf = -1
         self._emit_next = 0
@@ -319,8 +325,9 @@ class Decoder:
 
             # 2. Continue the current run only if it began at this frame's
             # keyframe (same GOP) and has not yet fed this frame's packet to
-            # the decoder. Otherwise seek: a different GOP, or the frame was
-            # already emitted and evicted, both need a fresh decode.
+            # the decoder. Otherwise seek. (Random access into an inter GOP
+            # inherently costs a decode from its keyframe -- same as a
+            # reference decoder; sequential playback uses decode_next instead.)
             can_continue = (
                 self._packet_iter is not None
                 and self._run_kf == kf_index
@@ -495,16 +502,7 @@ class Decoder:
             # evict it from the LRU cache before we return it.
             found = None
             for frame in packet.decode():
-                index = self._label_frame(frame)
-                rgb = frame.to_ndarray(format="rgb24")
-                analysis = None
-                if self._extractor:
-                    try:
-                        analysis = self._extractor.extract(frame, index)
-                    except Exception:
-                        analysis = None
-                entry = (rgb, analysis)
-                self._cache_put(index, entry)
+                index, entry = self._emit(frame)
                 if index == target_index:
                     found = entry
 
@@ -514,6 +512,60 @@ class Decoder:
         # Iterator exhausted (EOF reached): it must not be reused.
         self._packet_iter = None
         return self._frame_cache.get(target_index)
+
+    def _emit(self, frame) -> tuple[int, tuple]:
+        """Label, convert and cache an emitted frame. Returns (index, entry)."""
+        index = self._label_frame(frame)
+        rgb = frame.to_ndarray(format="rgb24")
+        analysis = None
+        if self._extractor:
+            try:
+                analysis = self._extractor.extract(frame, index)
+            except Exception:
+                analysis = None
+        entry = (rgb, analysis)
+        self._cache_put(index, entry)
+        return index, entry
+
+    def begin_sequential(self, start_index: int) -> None:
+        """Prepare display-order sequential decoding starting at start_index.
+
+        Playback advances in display (presentation) order -- the decoder's
+        natural output order -- so each step is one emission (O(1)), unlike
+        random access by decode index which must decode from a keyframe.
+        Seeks to the start frame's GOP keyframe; decode_next() then discards
+        emissions before the start's display position and returns the rest.
+        """
+        self._seq_buffer = []
+        self._seq_skip_until_display = self._index_to_display.get(start_index, start_index)
+        self._seek_to_keyframe(start_index)
+
+    def decode_next(self) -> Optional[tuple[int, np.ndarray, Optional[FrameAnalysis]]]:
+        """Next frame in display order: (decode_index, rgb, analysis) or None.
+
+        Pulls packets on demand and buffers a packet's batch across calls.
+        Frames whose display position precedes the sequential start are
+        skipped (they belong to the GOP head before the start frame).
+        """
+        while True:
+            while self._seq_buffer:
+                index, entry = self._seq_buffer.pop(0)
+                if self._index_to_display.get(index, index) < self._seq_skip_until_display:
+                    continue
+                return index, entry[0], entry[1]
+            if self._packet_iter is None:
+                return None
+            # Pull the next packet that yields at least one frame.
+            for packet in self._packet_iter:
+                if packet.size:
+                    self._decode_pos += 1
+                for frame in packet.decode():
+                    self._seq_buffer.append(self._emit(frame))
+                if self._seq_buffer:
+                    break
+            else:
+                self._packet_iter = None
+                return None
 
     def _label_frame(self, frame) -> int:
         """Decode-order index for an emitted (presentation-order) frame.

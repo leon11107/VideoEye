@@ -586,16 +586,11 @@ class MainWindow(QMainWindow):
         # The decoder is opened after this pass (see _load_file), so it builds
         # its order maps from the now poc-bearing frame list automatically.
 
-    def _select_frame(self, index: int, immediate: bool = False):
-        """Select and display a frame.
+    def _select_frame(self, index: int):
+        """Select a frame (interactive). Decode runs off the UI thread.
 
-        During playback only the decoded view and barchart are updated
-        (NALU parsing + hex are skipped for speed). They refresh when
-        playback pauses.
-
-        immediate=True decodes synchronously (used for playback, so frames are
-        shown in order and paced by the play timer rather than sampled by the
-        async worker). Interactive selection uses the worker for responsiveness.
+        NALU/hex are updated immediately; the picture + block overlay arrive
+        from the worker. Playback uses the sequential decode path instead.
         """
         if not self._demuxer.is_open:
             return
@@ -620,29 +615,8 @@ class MainWindow(QMainWindow):
             f"{frame.size:,} bytes"
         )
 
-        if not self._decoder.is_open:
-            return
-
-        if immediate:
-            # Synchronous decode for smooth, in-order, timer-paced playback.
-            # Block analysis (QP/MV grids) is costly per frame for HEVC/AV1, so
-            # skip it during playback unless an overlay actually needs it; the
-            # block panel/overlays refresh on pause.
-            want_analysis = self._decoded_view.has_overlays()
-            self._decode_lock.lock()
-            try:
-                rgb = self._decoder.decode_frame(index)
-                analysis = (self._decoder.get_analysis(index)
-                            if rgb is not None and want_analysis else None)
-            finally:
-                self._decode_lock.unlock()
-            if rgb is not None:
-                self._decoded_view.display_frame(rgb, index, analysis)
-                if want_analysis:
-                    self._block_info_view.set_analysis(analysis)
-        else:
-            # Interactive: decode off the UI thread; latest request wins so
-            # rapid scrubbing stays responsive.
+        # Decode off the UI thread; latest request wins so scrubbing stays snappy.
+        if self._decoder.is_open:
             self._decode_worker.request(index)
 
     def _on_frame_decoded(self, index: int, rgb, analysis):
@@ -723,9 +697,18 @@ class MainWindow(QMainWindow):
             self._start_playback()
 
     def _start_playback(self):
-        """Start automatic frame playback."""
+        """Start automatic frame playback (display order, sequential decode)."""
         if not self._demuxer.is_open or not self._demuxer.frames:
             return
+        start = self._barchart_view.selected_index
+        if start < 0:
+            start = 0
+        if self._decoder.is_open:
+            self._decode_lock.lock()
+            try:
+                self._decoder.begin_sequential(start)
+            finally:
+                self._decode_lock.unlock()
         self._is_playing = True
         self._play_action.setText("⏸ Pause")
         self._play_action.setToolTip("Pause (Space)")
@@ -757,14 +740,39 @@ class MainWindow(QMainWindow):
             self._select_frame(0)
 
     def _on_play_tick(self):
-        """Advance to next frame during playback."""
-        current = self._barchart_view.selected_index
-        total = len(self._demuxer.frames)
-        if current < total - 1:
-            self._select_frame(current + 1, immediate=True)
-        else:
-            # Reached the end, stop
+        """Advance one frame in display order via the sequential decoder."""
+        if not self._decoder.is_open:
             self._pause_playback()
+            return
+
+        want_analysis = self._decoded_view.has_overlays()
+        self._decode_lock.lock()
+        try:
+            res = self._decoder.decode_next()
+            # Overlay needs sidecar fill; the frame is freshly cached so this
+            # is a cache hit + sidecar lookup (only when an overlay is on).
+            analysis = (self._decoder.get_analysis(res[0])
+                        if res is not None and want_analysis else
+                        (res[2] if res is not None else None))
+        finally:
+            self._decode_lock.unlock()
+
+        if res is None:
+            self._pause_playback()  # reached end of stream
+            return
+
+        index, rgb, _ = res
+        self._current_index = index
+        self._barchart_view.select_frame(index)
+        self._decoded_view.display_frame(rgb, index, analysis if want_analysis else None)
+        if want_analysis:
+            self._block_info_view.set_analysis(analysis)
+
+        frame = self._demuxer.frames[index]
+        self._status_bar.showMessage(
+            f"Frame {index} | {frame.frame_type.value}-frame | "
+            f"{frame.size:,} bytes"
+        )
 
     def _on_analysis_tick(self):
         """Poll background block-analysis progress and stream results in."""
