@@ -74,9 +74,19 @@ class BarChartWidget(QWidget):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No frames loaded")
             return
 
-        # Draw bars
-        x = 5  # Left margin
-        for i, frame in enumerate(self._frames):
+        # Draw only the bars intersecting the dirty region. At 100k frames the
+        # widget is far wider than the viewport, so iterating every bar each
+        # repaint (and on every hover) is the dominant cost; clip to the range
+        # that actually needs painting.
+        step = self._bar_width + self._bar_spacing
+        dirty = event.rect()
+        first = max(0, (dirty.left() - 5) // step)
+        last = min(len(self._frames) - 1, (dirty.right() - 5) // step)
+
+        for i in range(first, last + 1):
+            frame = self._frames[i]
+            x = 5 + i * step
+
             # Calculate bar height proportional to frame size
             bar_height = int((frame.size / self._max_frame_size) * available_height)
             bar_height = max(2, bar_height)  # Minimum visible height
@@ -114,8 +124,6 @@ class BarChartWidget(QWidget):
                 ])
                 painter.drawPolygon(triangle)
 
-            x += self._bar_width + self._bar_spacing
-
         # Draw legend
         self._draw_legend(painter, rect)
 
@@ -128,16 +136,24 @@ class BarChartWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             index = self._get_frame_at_pos(event.pos().x())
             if index >= 0:
+                old = self._selected_index
                 self._selected_index = index
+                for i in (old, index):
+                    if i >= 0:
+                        self.update(self._bar_rect(i))
                 self.frame_selected.emit(index)
-                self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         """Handle mouse move for hover effect."""
         index = self._get_frame_at_pos(event.pos().x())
         if index != self._hover_index:
+            old = self._hover_index
             self._hover_index = index
-            self.update()
+            # Repaint only the two affected bars, not the whole (100k-wide)
+            # widget, so hover stays cheap while scrubbing the chart.
+            for i in (old, index):
+                if i >= 0:
+                    self.update(self._bar_rect(i))
 
             # Show tooltip with frame info
             if index >= 0 and index < len(self._frames):
@@ -155,6 +171,13 @@ class BarChartWidget(QWidget):
         self._hover_index = -1
         self.update()
 
+    def _bar_rect(self, index: int) -> QRect:
+        """Full-height repaint rect for one bar (covers its selection border
+        and keyframe triangle)."""
+        step = self._bar_width + self._bar_spacing
+        x = 5 + index * step
+        return QRect(x - 2, 0, self._bar_width + 4, self.height())
+
     def _get_frame_at_pos(self, x: int) -> int:
         """Get frame index at x position."""
         x -= 5  # Account for left margin
@@ -168,8 +191,11 @@ class BarChartWidget(QWidget):
     def select_frame(self, index: int) -> None:
         """Programmatically select a frame."""
         if 0 <= index < len(self._frames):
+            old = self._selected_index
             self._selected_index = index
-            self.update()
+            for i in (old, index):
+                if i >= 0:
+                    self.update(self._bar_rect(i))
 
     @property
     def selected_index(self) -> int:
