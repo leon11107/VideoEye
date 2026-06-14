@@ -37,6 +37,8 @@ from .veye_sidecar import (
     pus_from_frame,
     qp_grid_from_frame,
     read_incremental,
+    tu_chroma_from_frame,
+    tu_luma_from_frame,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -100,7 +102,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v3"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v4"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -268,6 +270,16 @@ class BlockSidecar:
         """HEVC prediction-unit partitions for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return pus_from_frame(fb) if fb is not None else None
+
+    def tu_luma_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """HEVC luma transform-unit partitions, or None if not ready."""
+        fb = self._frame(frame_index)
+        return tu_luma_from_frame(fb) if fb is not None else None
+
+    def tu_chroma_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """HEVC chroma transform-unit partitions, or None if not ready."""
+        fb = self._frame(frame_index)
+        return tu_chroma_from_frame(fb) if fb is not None else None
 
     def qp_grid_for(self, frame_index: int) -> Optional[np.ndarray]:
         """QP grid (int16, -1 = unknown) for a frame, or None if not ready."""

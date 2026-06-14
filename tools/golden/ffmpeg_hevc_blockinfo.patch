@@ -1,8 +1,8 @@
 diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
-index 7bb4fe9..0718d8d 100644
+index 7bb4fe9..15ce4a5 100644
 --- a/libavcodec/hevc/hevcdec.c
 +++ b/libavcodec/hevc/hevcdec.c
-@@ -77,6 +77,7 @@ static void pic_arrays_free(HEVCLayerContext *l)
+@@ -77,10 +77,12 @@ static void pic_arrays_free(HEVCLayerContext *l)
  
      av_freep(&l->skip_flag);
      av_freep(&l->tab_ct_depth);
@@ -10,7 +10,12 @@ index 7bb4fe9..0718d8d 100644
  
      av_freep(&l->tab_ipm);
      av_freep(&l->cbf_luma);
-@@ -117,9 +118,10 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
+     av_freep(&l->is_pcm);
++    av_freep(&l->tab_tu_log2);
+ 
+     av_freep(&l->qp_y_tab);
+     av_freep(&l->tab_slice_address);
+@@ -117,15 +119,17 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
      if (!l->sao || !l->deblock)
          goto fail;
  
@@ -24,7 +29,35 @@ index 7bb4fe9..0718d8d 100644
          goto fail;
  
      l->cbf_luma = av_malloc_array(sps->min_tb_width, sps->min_tb_height);
-@@ -2316,6 +2318,22 @@ static av_always_inline void set_ct_depth(const HEVCSPS *sps, uint8_t *tab_ct_de
+     l->tab_ipm  = av_mallocz(min_pu_size);
+     l->is_pcm   = av_malloc_array(sps->min_pu_width + 1, sps->min_pu_height + 1);
+-    if (!l->tab_ipm || !l->cbf_luma || !l->is_pcm)
++    l->tab_tu_log2 = av_malloc_array(sps->min_tb_width, sps->min_tb_height);
++    if (!l->tab_ipm || !l->cbf_luma || !l->is_pcm || !l->tab_tu_log2)
+         goto fail;
+ 
+     l->filter_slice_edges = av_mallocz(ctb_count);
+@@ -1309,6 +1313,19 @@ static int hls_transform_unit(HEVCLocalContext *lc,
+     const int log2_trafo_size_c = log2_trafo_size - sps->hshift[1];
+     int i;
+ 
++    /* VideoEye: record this leaf's luma TU size for every min-TB it covers. */
++    if (l->tab_tu_log2) {
++        int log2_tb = sps->log2_min_tb_size;
++        int span    = 1 << (log2_trafo_size - log2_tb);
++        int x_tb    = x0 >> log2_tb;
++        int y_tb    = y0 >> log2_tb;
++        int ty, tx;
++        for (ty = 0; ty < span && (y_tb + ty) < sps->min_tb_height; ty++)
++            for (tx = 0; tx < span && (x_tb + tx) < sps->min_tb_width; tx++)
++                l->tab_tu_log2[(y_tb + ty) * sps->min_tb_width + (x_tb + tx)] =
++                    (uint8_t)log2_trafo_size;
++    }
++
+     if (lc->cu.pred_mode == MODE_INTRA) {
+         int trafo_size = 1 << log2_trafo_size;
+         ff_hevc_set_neighbour_available(lc, x0, y0, trafo_size, trafo_size, sps->log2_ctb_size);
+@@ -2316,6 +2333,22 @@ static av_always_inline void set_ct_depth(const HEVCSPS *sps, uint8_t *tab_ct_de
                 ct_depth, length);
  }
  
@@ -47,7 +80,7 @@ index 7bb4fe9..0718d8d 100644
  static const uint8_t tab_mode_idx[] = {
       0,  1,  2,  2,  2,  2,  3,  5,  7,  8, 10, 12, 13, 15, 17, 18, 19, 20,
      21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31};
-@@ -2598,6 +2616,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+@@ -2598,6 +2631,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
      }
  
      set_ct_depth(sps, l->tab_ct_depth, x0, y0, log2_cb_size, lc->ct_depth);
@@ -55,7 +88,26 @@ index 7bb4fe9..0718d8d 100644
  
      return 0;
  }
-@@ -3546,11 +3565,13 @@ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
+@@ -3281,6 +3315,7 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+     memset(l->horizontal_bs, 0, l->bs_width * l->bs_height);
+     memset(l->vertical_bs,   0, l->bs_width * l->bs_height);
+     memset(l->cbf_luma,      0, sps->min_tb_width * sps->min_tb_height);
++    memset(l->tab_tu_log2,   0, sps->min_tb_width * sps->min_tb_height);
+     memset(l->is_pcm,        0, (sps->min_pu_width + 1) * (sps->min_pu_height + 1));
+     memset(l->tab_slice_address, -1, pic_size_in_ctb * sizeof(*l->tab_slice_address));
+ 
+@@ -3388,7 +3423,9 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+         AVFrame *vf = s->cur_frame->needs_fg ? s->cur_frame->frame_grain
+                                              : s->cur_frame->f;
+         ff_veye_alloc_blockinfo_hevc(vf, sps->min_cb_width, sps->min_cb_height,
+-                                     sps->log2_min_cb_size);
++                                     sps->log2_min_cb_size,
++                                     sps->min_tb_width, sps->min_tb_height,
++                                     sps->log2_min_tb_size);
+     }
+ 
+     ret = ff_hevc_output_frames(s, s->layers_active_decode, s->layers_active_output,
+@@ -3546,13 +3583,18 @@ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
      if (l->sps && !s->avctx->hwaccel) {
          const HEVCSPS *sps = l->sps;
          AVFrame *vf = out->needs_fg ? out->frame_grain : out->f;
@@ -70,14 +122,20 @@ index 7bb4fe9..0718d8d 100644
 -            l->tab_ipm, l->is_pcm, pf, sizeof(MvField),
 +            l->skip_flag, l->tab_ct_depth, l->tab_part_mode, l->qp_y_tab,
 +            l->tab_ipm, l->is_pcm, out->tab_mvf, sizeof(MvField), &mvf_layout,
++            l->tab_tu_log2,
              sps->min_cb_width, sps->min_cb_height, sps->min_pu_width,
-             sps->log2_min_cb_size, sps->log2_ctb_size, sps->log2_min_pu_size);
+-            sps->log2_min_cb_size, sps->log2_ctb_size, sps->log2_min_pu_size);
++            sps->min_tb_width, sps->min_tb_height,
++            sps->log2_min_cb_size, sps->log2_ctb_size, sps->log2_min_pu_size,
++            sps->log2_min_tb_size);
      }
+ 
+     return 0;
 diff --git a/libavcodec/hevc/hevcdec.h b/libavcodec/hevc/hevcdec.h
-index 911d5c3..a2f09de 100644
+index 911d5c3..3a2fd9d 100644
 --- a/libavcodec/hevc/hevcdec.h
 +++ b/libavcodec/hevc/hevcdec.h
-@@ -466,6 +466,7 @@ typedef struct HEVCLayerContext {
+@@ -466,11 +466,13 @@ typedef struct HEVCLayerContext {
      //  CU
      uint8_t                *skip_flag;
      uint8_t                *tab_ct_depth;
@@ -85,8 +143,14 @@ index 911d5c3..a2f09de 100644
  
      // PU
      uint8_t                *cbf_luma; // cbf_luma of colocated TU
+     uint8_t                *tab_ipm;
+     uint8_t                *is_pcm;
++    uint8_t                *tab_tu_log2; // VideoEye: luma TU log2 size per min-TB
+ 
+     // CTB-level flags affecting loop filter operation
+     uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..f5bc1ba 100644
+index 2d817c7..576c022 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
 @@ -8,7 +8,10 @@
@@ -100,7 +164,70 @@ index 2d817c7..f5bc1ba 100644
  
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
-@@ -110,11 +113,13 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+@@ -62,16 +65,30 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+ 
+ /* Allocate the HEVC side data on @frame (or return the one already attached)
+  * and (re)write its header. On a fresh allocation the records are zeroed. */
++/* Total side-data size: header + min-CB records + TU sub-header + min-TB grid. */
++static size_t veye_hevc_size(int min_cb_width, int min_cb_height,
++                             int min_tb_width, int min_tb_height)
++{
++    size_t n_cb = (size_t)min_cb_width * (size_t)min_cb_height;
++    size_t n_tb = (size_t)min_tb_width * (size_t)min_tb_height;
++    return sizeof(VeyeBlockInfoHeader) + n_cb * sizeof(VeyeBlockRecordHEVC)
++           + sizeof(VeyeTuHeader) + n_tb;
++}
++
+ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
+                                             int min_cb_height,
+-                                            int log2_min_cb_size)
++                                            int log2_min_cb_size,
++                                            int min_tb_width, int min_tb_height,
++                                            int log2_min_tb_size)
+ {
+     VeyeBlockInfoHeader *hdr;
++    VeyeTuHeader *tuh;
+     AVFrameSideData *sd;
+-    size_t n, size;
++    size_t n_cb, size;
+ 
+-    n    = (size_t)min_cb_width * (size_t)min_cb_height;
+-    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecordHEVC);
++    n_cb = (size_t)min_cb_width * (size_t)min_cb_height;
++    size = veye_hevc_size(min_cb_width, min_cb_height,
++                          min_tb_width, min_tb_height);
+ 
+     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO);
+     if (sd && sd->size == size) {
+@@ -94,31 +111,44 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
+     hdr->grid_w      = (uint32_t)min_cb_width;
+     hdr->grid_h      = (uint32_t)min_cb_height;
+     hdr->block_unit  = (uint32_t)(1 << log2_min_cb_size);
+-    hdr->n_records   = (uint32_t)n;
++    hdr->n_records   = (uint32_t)n_cb;
++
++    tuh = (VeyeTuHeader *)(sd->data + sizeof(VeyeBlockInfoHeader)
++                           + n_cb * sizeof(VeyeBlockRecordHEVC));
++    tuh->tu_grid_w = (uint32_t)min_tb_width;
++    tuh->tu_grid_h = (uint32_t)min_tb_height;
++    tuh->tu_unit   = (uint32_t)(1 << log2_min_tb_size);
+     return sd;
+ }
+ 
+ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+-                                 int min_cb_height, int log2_min_cb_size)
++                                 int min_cb_height, int log2_min_cb_size,
++                                 int min_tb_width, int min_tb_height,
++                                 int log2_min_tb_size)
+ {
+     if (!frame || min_cb_width <= 0 || min_cb_height <= 0)
+         return 0;
+     return veye_hevc_side_data(frame, min_cb_width, min_cb_height,
+-                               log2_min_cb_size) ? 0 : AVERROR(ENOMEM);
++                               log2_min_cb_size, min_tb_width, min_tb_height,
++                               log2_min_tb_size) ? 0 : AVERROR(ENOMEM);
+ }
+ 
  int ff_veye_export_blockinfo_hevc(AVFrame *frame,
                                    const uint8_t *skip_flag,
                                    const uint8_t *tab_ct_depth,
@@ -112,10 +239,27 @@ index 2d817c7..f5bc1ba 100644
 +                                  const void   *tab_mvf,
                                    size_t mvf_elem_size,
 +                                  const VeyeMvFieldLayout *mvf_layout,
++                                  const uint8_t *tab_tu_log2,
                                    int min_cb_width, int min_cb_height,
                                    int min_pu_width,
++                                  int min_tb_width, int min_tb_height,
                                    int log2_min_cb_size, int log2_ctb_size,
-@@ -142,28 +147,112 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+-                                  int log2_min_pu_size)
++                                  int log2_min_pu_size, int log2_min_tb_size)
+ {
+     VeyeBlockRecordHEVC *rec;
+     AVFrameSideData *sd;
+@@ -129,7 +159,8 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+         return 0;
+ 
+     sd = veye_hevc_side_data(frame, min_cb_width, min_cb_height,
+-                             log2_min_cb_size);
++                             log2_min_cb_size, min_tb_width, min_tb_height,
++                             log2_min_tb_size);
+     if (!sd)
+         return AVERROR(ENOMEM);
+ 
+@@ -142,28 +173,123 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -173,6 +317,17 @@ index 2d817c7..f5bc1ba 100644
 +            rec->reserved  = 0;
 +            rec++;
 +        }
++    }
++
++    /* Append the luma TU-size grid (min-TB granularity), after the records
++     * and the VeyeTuHeader that veye_hevc_side_data already wrote. */
++    if (tab_tu_log2 && min_tb_width > 0 && min_tb_height > 0) {
++        size_t n_cb = (size_t)min_cb_width * (size_t)min_cb_height;
++        size_t n_tb = (size_t)min_tb_width * (size_t)min_tb_height;
++        uint8_t *tu = sd->data + sizeof(VeyeBlockInfoHeader)
++                    + n_cb * sizeof(VeyeBlockRecordHEVC)
++                    + sizeof(VeyeTuHeader);
++        memcpy(tu, tab_tu_log2, n_tb);
 +    }
 +
 +    return 0;
@@ -234,7 +389,7 @@ index 2d817c7..f5bc1ba 100644
          }
      }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..4cea04f 100644
+index eadfb7b..db78257 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,7 @@
@@ -242,7 +397,7 @@ index eadfb7b..4cea04f 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 3
++#define VEYE_BI_VERSION 4
  
  typedef struct VeyeBlockInfoHeader {
      uint32_t magic;       ///< VEYE_BI_MAGIC
@@ -287,7 +442,7 @@ index eadfb7b..4cea04f 100644
  /*
   * HEVC cells are emitted at min-CB (typically 8x8) granularity. Unlike the
   * fixed-size H.264 macroblock, an HEVC coding unit spans a variable number
-@@ -49,8 +83,16 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -49,10 +83,31 @@ typedef struct VeyeBlockRecordHEVC {
      uint8_t  cu_log2;     ///< log2 of the luma CU size in pixels (3..6)
      uint8_t  pred;        ///< PredType: 1 intra, 2 inter, 3 skip, 4 pcm
      uint8_t  intra_mode;  ///< luma intra prediction mode 0..34 (intra only)
@@ -304,8 +459,34 @@ index eadfb7b..4cea04f 100644
 +    uint8_t  reserved;
  } VeyeBlockRecordHEVC;
  
++/*
++ * VideoEye v4 (HEVC): after the per-min-CB records a luma transform-unit size
++ * grid is appended at min-TB granularity: a VeyeTuHeader followed by
++ * tu_grid_w * tu_grid_h bytes, each the log2 luma TU size covering that cell
++ * (0 = no explicit TU, i.e. use the CU size). Chroma TUs are derived by the
++ * consumer. This sub-grid is independent of the coarser min-CB record grid.
++ */
++typedef struct VeyeTuHeader {
++    uint32_t tu_grid_w;   ///< min-TB cells across
++    uint32_t tu_grid_h;   ///< min-TB cells down
++    uint32_t tu_unit;     ///< pixels per min-TB cell (e.g. 4)
++} VeyeTuHeader;
++
  /**
-@@ -83,23 +125,34 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+  * Serialize a per-cell grid into AV_FRAME_DATA_VEYE_BLOCKINFO side data and
+  * attach it to @p frame. Reads are indexed with @p grid_stride; output is
+@@ -74,7 +129,9 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+  * frame. Records are zero-initialized. Returns 0 on success/skip, ENOMEM else.
+  */
+ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+-                                 int min_cb_height, int log2_min_cb_size);
++                                 int min_cb_height, int log2_min_cb_size,
++                                 int min_tb_width, int min_tb_height,
++                                 int log2_min_tb_size);
+ 
+ /**
+  * Serialize an HEVC min-CB grid into AV_FRAME_DATA_VEYE_BLOCKINFO. The HEVC
+@@ -83,26 +140,39 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
   * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
   * one is already attached, otherwise allocates a fresh one.
   *
@@ -342,6 +523,12 @@ index eadfb7b..4cea04f 100644
 +                                  const void   *tab_mvf,
                                    size_t mvf_elem_size,
 +                                  const VeyeMvFieldLayout *mvf_layout,
++                                  const uint8_t *tab_tu_log2,
                                    int min_cb_width, int min_cb_height,
                                    int min_pu_width,
++                                  int min_tb_width, int min_tb_height,
                                    int log2_min_cb_size, int log2_ctb_size,
+-                                  int log2_min_pu_size);
++                                  int log2_min_pu_size, int log2_min_tb_size);
+ 
+ #endif /* AVCODEC_VEYE_BLOCKINFO_H */

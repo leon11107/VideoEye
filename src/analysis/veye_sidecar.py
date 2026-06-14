@@ -27,6 +27,9 @@ _ENTRY_HDR = struct.Struct("<II")  # frame_index, payload_size
 #                      u32 grid_w, u32 grid_h, u32 block_unit, u32 n_records
 _BLK_MAGIC = 0x4B424556  # bytes V E B K
 _BLK_HDR = struct.Struct("<IHHIIIII")
+# v4 HEVC: appended after the records -> u32 tu_grid_w, tu_grid_h, tu_unit,
+# then tu_grid_w*tu_grid_h u8 luma-TU log2 sizes (0 = none, use CU size).
+_TU_HDR = struct.Struct("<III")
 # VeyeBlockRecord (H.264): u32 mb_type, i32 qp
 _REC = np.dtype([("mb_type", "<u4"), ("qp", "<i4")])
 # VeyeBlockRecordHEVC (sidecar v2): u8 cu_log2, u8 pred, u8 intra_mode,
@@ -107,6 +110,8 @@ class VeyeFrameBlocks:
     intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
     pred_flag: Optional[np.ndarray] = None  # HEVC: PredFlag (0/1/2/3 = I/L0/L1/BI)
     part_mode: Optional[np.ndarray] = None  # HEVC: PartMode per cell (0..7)
+    tu_log2: Optional[np.ndarray] = None    # HEVC: luma TU log2 per min-TB (0=none)
+    tu_unit: int = 0                        # HEVC: pixels per min-TB cell
     mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
     ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
     bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
@@ -235,6 +240,20 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         ref = np.empty((grid_h, grid_w, 2), dtype=np.int8)
         ref[..., 0] = recs["ref0"].reshape(grid_h, grid_w)
         ref[..., 1] = recs["ref1"].reshape(grid_h, grid_w)
+
+        # v4: luma TU-size grid appended after the records (min-TB granularity).
+        tu_log2 = None
+        tu_unit = 0
+        if _ver >= 4:
+            tu_off = _BLK_HDR.size + n_records * _REC_HEVC.itemsize
+            if len(payload) >= tu_off + _TU_HDR.size:
+                tw, th, tu_unit = _TU_HDR.unpack_from(payload, tu_off)
+                g_off = tu_off + _TU_HDR.size
+                if tw > 0 and th > 0 and len(payload) >= g_off + tw * th:
+                    tu_log2 = np.frombuffer(
+                        payload, dtype=np.uint8, count=tw * th, offset=g_off
+                    ).reshape(th, tw).copy()
+
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
             qp=recs["qp"].reshape(grid_h, grid_w).copy(),
@@ -243,6 +262,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             intra_mode=recs["intra_mode"].reshape(grid_h, grid_w).copy(),
             pred_flag=recs["pred_flag"].reshape(grid_h, grid_w).copy(),
             part_mode=recs["part_mode"].reshape(grid_h, grid_w).copy(),
+            tu_log2=tu_log2, tu_unit=tu_unit,
             mv=mv, ref_idx=ref,
         )
 
@@ -399,6 +419,52 @@ def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
                 out.append((px + int(fx * cu_px), py + int(fy * cu_px),
                             int(fw * cu_px), int(fh * cu_px), 0, p, mode))
     return _pack(out, BLOCK_DTYPE)
+
+
+def _tu_rects(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
+    """HEVC transform units (BLOCK_DTYPE rectangles) from the min-TB luma TU
+    grid. Cells with no explicit TU (skip / no residual) fall back to the CU
+    size. For chroma (assuming 4:2:0) a 4x4 luma TU has no 2x2 chroma TU --
+    the four siblings share one 8x8-region chroma TU -- so the effective size
+    is clamped to >= 8.
+    """
+    if (fb.codec_id != _CODEC_HEVC or fb.tu_log2 is None
+            or fb.cu_log2 is None):
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    tu = fb.tu_log2
+    cu = fb.cu_log2
+    unit = fb.tu_unit or fb.block_unit
+    th, tw = tu.shape
+    ratio = max(1, fb.block_unit // unit)
+    cu_h, cu_w = cu.shape
+    out: list[tuple] = []
+    for my in range(th):
+        py = my * unit
+        for mx in range(tw):
+            l = int(tu[my, mx])
+            if l == 0:  # no explicit TU -> use the containing CU
+                cy, cx = my // ratio, mx // ratio
+                l = int(cu[cy, cx]) if cy < cu_h and cx < cu_w else 0
+            if l == 0:
+                continue
+            if chroma and l < 3:
+                l = 3  # 4:2:0: four 4x4 luma TUs share one 8x8 chroma TU
+            size = 1 << l
+            px = mx * unit
+            if px % size or py % size:
+                continue  # not the TU's top-left cell
+            out.append((px, py, size, size, 0, 0, l))
+    return _pack(out, BLOCK_DTYPE)
+
+
+def tu_luma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Luma transform-unit rectangles."""
+    return _tu_rects(fb, chroma=False)
+
+
+def tu_chroma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Chroma transform-unit rectangles (4:2:0 derivation)."""
+    return _tu_rects(fb, chroma=True)
 
 
 def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
