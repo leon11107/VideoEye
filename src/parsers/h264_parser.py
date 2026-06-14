@@ -133,7 +133,9 @@ class H264Parser:
                 syntax["offset_for_top_to_bottom_field"] = reader.read_se()
                 num_ref_frames_in_pic_order_cnt_cycle = reader.read_ue()
                 syntax["num_ref_frames_in_pic_order_cnt_cycle"] = num_ref_frames_in_pic_order_cnt_cycle
-                for i in range(num_ref_frames_in_pic_order_cnt_cycle):
+                # Spec range is 0..255; clamp so corrupt input can't spin a
+                # giant loop on the UI thread.
+                for i in range(min(num_ref_frames_in_pic_order_cnt_cycle, 256)):
                     reader.read_se()  # offset_for_ref_frame
 
             syntax["max_num_ref_frames"] = reader.read_ue()

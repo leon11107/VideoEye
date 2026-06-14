@@ -222,6 +222,10 @@ class NALUParser:
         nalus = []
         offset = 0
 
+        # A zero length-size (malformed config) would make offset never advance.
+        if self.nal_length_size <= 0:
+            return nalus
+
         while offset < len(data):
             if offset + self.nal_length_size > len(data):
                 break

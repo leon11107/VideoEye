@@ -119,6 +119,10 @@ class MainWindow(QMainWindow):
         self._demuxer = Demuxer()
         self._decoder = Decoder()
         self._current_file = ""
+        # Guards against re-entrant loads: _load_file pumps the event loop via
+        # processEvents (for the progress bar), which could otherwise let a
+        # second Open/drop start mid-load and corrupt demuxer/decoder state.
+        self._is_loading = False
 
         # Off-UI-thread decoding. _decode_lock serializes all decoder access
         # (worker decodes; open/close hold it on the UI thread).
@@ -434,6 +438,12 @@ class MainWindow(QMainWindow):
 
     def _load_file(self, file_path: str):
         """Load a video file."""
+        # Ignore re-entrant loads triggered while a load is already pumping the
+        # event loop (a second Open dialog, a file drop, etc.).
+        if self._is_loading:
+            return
+        self._is_loading = True
+
         # Stop any ongoing playback
         self._pause_playback()
 
@@ -529,6 +539,7 @@ class MainWindow(QMainWindow):
 
         finally:
             progress.close()
+            self._is_loading = False
 
     def _close_file(self):
         """Close current file and release all memory."""

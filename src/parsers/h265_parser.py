@@ -273,9 +273,11 @@ class H265Parser:
                 uniform_spacing_flag = reader.read_flag()
                 syntax["uniform_spacing_flag"] = uniform_spacing_flag
                 if not uniform_spacing_flag:
-                    for i in range(num_tile_columns_minus1):
+                    # Clamp tile counts (corrupt input could be enormous and
+                    # spin a giant loop / build a huge dict on the UI thread).
+                    for i in range(min(num_tile_columns_minus1, 1024)):
                         syntax[f"column_width_minus1[{i}]"] = reader.read_ue()
-                    for i in range(num_tile_rows_minus1):
+                    for i in range(min(num_tile_rows_minus1, 1024)):
                         syntax[f"row_height_minus1[{i}]"] = reader.read_ue()
                 syntax["loop_filter_across_tiles_enabled_flag"] = reader.read_flag()
 
