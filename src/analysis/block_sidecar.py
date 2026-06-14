@@ -236,6 +236,16 @@ class BlockSidecar:
                 pass
         if thread is not None and thread.is_alive():
             thread.join(timeout=5)
+            if thread.is_alive():
+                # terminate() did not take (helper ignored it / mid-write):
+                # force kill so it cannot keep writing the cache after we
+                # return, then wait for the worker to unwind.
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                thread.join(timeout=5)
         with self._lock:
             self._frames = {}
             self._proc = None

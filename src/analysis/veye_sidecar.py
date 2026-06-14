@@ -124,22 +124,27 @@ def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
     if len(data) < _FILE_HDR.size:
         return None
     magic, _ver, n_frames = _FILE_HDR.unpack_from(data, 0)
-    if magic != _FILE_MAGIC:
-        return None
+    if magic != _FILE_MAGIC or n_frames <= 0:
+        return None  # bad magic, or header not finalised (n_frames still 0)
 
     frames: dict[int, VeyeFrameBlocks] = {}
     off = _FILE_HDR.size
     for _ in range(n_frames):
+        # Any truncation means the file is incomplete (e.g. an interrupted or
+        # still-running helper): reject it so the caller regenerates rather
+        # than trusting a partial frame set.
         if off + _ENTRY_HDR.size > len(data):
-            break
+            return None
         frame_index, payload_size = _ENTRY_HDR.unpack_from(data, off)
         off += _ENTRY_HDR.size
+        if off + payload_size > len(data):
+            return None
         payload = data[off:off + payload_size]
         off += payload_size
         fb = _parse_payload(payload)
         if fb is not None:
             frames[frame_index] = fb
-    return frames
+    return frames if frames else None
 
 
 FILE_HEADER_SIZE = _FILE_HDR.size
