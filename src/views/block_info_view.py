@@ -1,11 +1,15 @@
-"""Block Info panel: overlay toggles, per-frame stats, and an Elecard-style
-hierarchical name|value table for the block under the cursor."""
+"""Block analysis panels, presented as separate tabs:
+
+- OverlayControls: overlay toggles (QP / MV / Partition CU·PU·TU / Types).
+- FrameStatsPanel: per-frame statistics.
+- BlockHoverPanel: Elecard-style name|value table for the block under cursor.
+"""
 
 import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QGroupBox, QHBoxLayout, QLabel, QToolButton, QTreeWidget,
+    QCheckBox, QHBoxLayout, QLabel, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
@@ -17,8 +21,8 @@ _SECTION_BG = QColor("#2d5a88")
 _SECTION_FG = QColor("#ffffff")
 
 
-class BlockInfoView(QWidget):
-    """Controls analysis overlays and shows block-level statistics."""
+class OverlayControls(QWidget):
+    """Overlay enable/disable toggles."""
 
     overlays_changed = pyqtSignal(dict)
 
@@ -29,15 +33,13 @@ class BlockInfoView(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(8, 8, 8, 8)
 
-        overlay_group = QGroupBox("Overlays")
-        overlay_layout = QVBoxLayout(overlay_group)
         for key, (label, _render) in OVERLAYS.items():
             cb = QCheckBox(label)
             cb.setChecked(key in DEFAULT_ON)  # before connect: no startup emit
             cb.toggled.connect(self._on_toggled)
-            overlay_layout.addWidget(cb)
+            layout.addWidget(cb)
             self._checkboxes[key] = cb
 
         # Partition: a master checkbox (enabling it always draws CU) plus an
@@ -56,7 +58,7 @@ class BlockInfoView(QWidget):
         part_row.addWidget(part_master)
         part_row.addWidget(self._part_btn)
         part_row.addStretch()
-        overlay_layout.addLayout(part_row)
+        layout.addLayout(part_row)
 
         self._part_container = QWidget()
         part_layout = QVBoxLayout(self._part_container)
@@ -68,39 +70,10 @@ class BlockInfoView(QWidget):
             part_layout.addWidget(cb)
             self._checkboxes[key] = cb
         self._part_container.setVisible(False)  # hidden until expanded
-        # PU/TU options are only meaningful when partition is on.
         self._part_container.setEnabled(part_master.isChecked())
         part_master.toggled.connect(self._part_container.setEnabled)
-        overlay_layout.addWidget(self._part_container)
-
-        layout.addWidget(overlay_group)
-
-        stats_group = QGroupBox("Frame Statistics")
-        stats_layout = QVBoxLayout(stats_group)
-        self._stats_label = QLabel("No analysis data")
-        self._stats_label.setWordWrap(True)
-        self._stats_label.setStyleSheet("font-family: Consolas, monospace;")
-        stats_layout.addWidget(self._stats_label)
-        layout.addWidget(stats_group)
-
-        block_group = QGroupBox("Block Info")
-        block_layout = QVBoxLayout(block_group)
-        self._tree = QTreeWidget()
-        self._tree.setColumnCount(2)
-        self._tree.setHeaderLabels(["name", "value"])
-        self._tree.setRootIsDecorated(False)
-        self._tree.setIndentation(12)
-        self._tree.setAlternatingRowColors(True)
-        self._tree.setUniformRowHeights(True)
-        self._tree.setStyleSheet(
-            "QTreeWidget { font-family: Consolas, monospace; }"
-            "QTreeWidget::item { height: 18px; }"
-        )
-        self._tree.header().setStretchLastSection(True)
-        block_layout.addWidget(self._tree)
-        layout.addWidget(block_group, stretch=1)
-
-        self._set_tree_placeholder("Hover over the frame")
+        layout.addWidget(self._part_container)
+        layout.addStretch()
 
     def _on_partition_expand(self, expanded: bool):
         self._part_container.setVisible(expanded)
@@ -112,6 +85,21 @@ class BlockInfoView(QWidget):
 
     def overlay_flags(self) -> dict:
         return {key: cb.isChecked() for key, cb in self._checkboxes.items()}
+
+
+class FrameStatsPanel(QWidget):
+    """Per-frame block-analysis statistics."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self._stats_label = QLabel("No analysis data")
+        self._stats_label.setWordWrap(True)
+        self._stats_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._stats_label.setStyleSheet("font-family: Consolas, monospace;")
+        layout.addWidget(self._stats_label)
+        layout.addStretch()
 
     def set_analysis(self, analysis) -> None:
         """Update per-frame statistics from a FrameAnalysis (or None)."""
@@ -154,6 +142,32 @@ class BlockInfoView(QWidget):
             lines.append("Partition/Types: pending patched-FFmpeg backend")
 
         self._stats_label.setText("\n".join(lines))
+
+    def clear(self) -> None:
+        self._stats_label.setText("No analysis data")
+
+
+class BlockHoverPanel(QWidget):
+    """Name|value table for the block currently under the cursor."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(2)
+        self._tree.setHeaderLabels(["name", "value"])
+        self._tree.setRootIsDecorated(False)
+        self._tree.setIndentation(12)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setStyleSheet(
+            "QTreeWidget { font-family: Consolas, monospace; }"
+            "QTreeWidget::item { height: 18px; }"
+        )
+        self._tree.header().setStretchLastSection(True)
+        layout.addWidget(self._tree)
+        self._set_tree_placeholder("Hover over the frame")
 
     def set_hover(self, info) -> None:
         """Rebuild the block-info tree from a hover dict (or None)."""
@@ -206,7 +220,6 @@ class BlockInfoView(QWidget):
         self._tree.expandAll()
 
     def clear(self) -> None:
-        self._stats_label.setText("No analysis data")
         self._tree.clear()
         self._set_tree_placeholder("Hover over the frame")
 

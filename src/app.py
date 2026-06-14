@@ -18,7 +18,9 @@ from .views.barchart_view import BarChartView
 from .views.decoded_view import DecodedView
 from .views.stream_viewer import StreamViewer
 from .views.hex_viewer import HexViewer
-from .views.block_info_view import BlockInfoView
+from .views.block_info_view import (
+    OverlayControls, FrameStatsPanel, BlockHoverPanel
+)
 
 
 class MainWindow(QMainWindow):
@@ -78,20 +80,38 @@ class MainWindow(QMainWindow):
                      Qt.DockWidgetArea.TopDockWidgetArea |
                      Qt.DockWidgetArea.BottomDockWidgetArea)
 
-        # Left dock - Stream info
+        # Left docks, presented as tabs: Stream Info / Overlays / Frame Stats /
+        # Block Info. Each is its own dock so the user can pull tabs apart, but
+        # they start tabbed together so the panel isn't crowded.
         self._stream_view = StreamView()
         stream_dock = QDockWidget("Stream Info", self)
         stream_dock.setWidget(self._stream_view)
         stream_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stream_dock)
 
-        # Left dock - Block info (overlay toggles + block statistics)
-        self._block_info_view = BlockInfoView()
+        self._overlay_controls = OverlayControls()
+        overlay_dock = QDockWidget("Overlays", self)
+        overlay_dock.setWidget(self._overlay_controls)
+        overlay_dock.setAllowedAreas(all_areas)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, overlay_dock)
+
+        self._frame_stats = FrameStatsPanel()
+        stats_dock = QDockWidget("Frame Stats", self)
+        stats_dock.setWidget(self._frame_stats)
+        stats_dock.setAllowedAreas(all_areas)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stats_dock)
+
+        self._block_hover = BlockHoverPanel()
         block_dock = QDockWidget("Block Info", self)
-        block_dock.setWidget(self._block_info_view)
+        block_dock.setWidget(self._block_hover)
         block_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, block_dock)
-        self.splitDockWidget(stream_dock, block_dock, Qt.Orientation.Vertical)
+
+        # Tab them together and show Stream Info first.
+        self.tabifyDockWidget(stream_dock, overlay_dock)
+        self.tabifyDockWidget(overlay_dock, stats_dock)
+        self.tabifyDockWidget(stats_dock, block_dock)
+        stream_dock.raise_()
 
         # Bottom dock - Bar chart
         self._barchart_view = BarChartView()
@@ -128,6 +148,8 @@ class MainWindow(QMainWindow):
         # Store dock references for menu
         self._docks = {
             'stream': stream_dock,
+            'overlays': overlay_dock,
+            'stats': stats_dock,
             'blockinfo': block_dock,
             'barchart': barchart_dock,
             'viewer': viewer_dock,
@@ -326,14 +348,14 @@ class MainWindow(QMainWindow):
         # Stream viewer NALU selection -> hex viewer highlight
         self._stream_viewer.nalu_selected.connect(self._on_nalu_selected)
 
-        # Block info overlay toggles -> decoded view layers
-        self._block_info_view.overlays_changed.connect(
+        # Overlay toggles -> decoded view layers
+        self._overlay_controls.overlays_changed.connect(
             self._decoded_view.set_overlays
         )
 
         # Hovered block in decoded view -> block info panel
         self._decoded_view.block_hovered.connect(
-            self._block_info_view.set_hover
+            self._block_hover.set_hover
         )
 
     def _open_file_dialog(self):
@@ -473,7 +495,8 @@ class MainWindow(QMainWindow):
         self._stream_viewer.clear()
         self._hex_viewer.clear()
         self._stream_view.clear()
-        self._block_info_view.clear()
+        self._frame_stats.clear()
+        self._block_hover.clear()
 
         self._close_action.setEnabled(False)
 
@@ -551,7 +574,7 @@ class MainWindow(QMainWindow):
         if rgb is None:
             return
         self._decoded_view.display_frame(rgb, index, analysis)
-        self._block_info_view.set_analysis(analysis)
+        self._frame_stats.set_analysis(analysis)
 
     def _update_analysis_views(self, frame: 'FrameInfo'):
         """Load packet data on demand and update NALU & hex views."""
@@ -683,7 +706,7 @@ class MainWindow(QMainWindow):
         self._barchart_view.select_frame(index)
         self._decoded_view.display_frame(rgb, index, analysis if want_analysis else None)
         if want_analysis:
-            self._block_info_view.set_analysis(analysis)
+            self._frame_stats.set_analysis(analysis)
 
         frame = self._demuxer.frames[index]
         self._status_bar.showMessage(
@@ -725,7 +748,7 @@ class MainWindow(QMainWindow):
                 self._decode_lock.unlock()
             if analysis is not None:
                 self._decoded_view.refresh_overlays(analysis)
-                self._block_info_view.set_analysis(analysis)
+                self._frame_stats.set_analysis(analysis)
         self._last_ready = ready
 
         if terminal:
