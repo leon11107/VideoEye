@@ -6,7 +6,9 @@ from PyQt6.QtWidgets import (
     QApplication, QToolBar, QStatusBar, QProgressDialog,
     QSpinBox, QLabel
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import (
+    Qt, QThread, pyqtSignal, QTimer, QMutex, QWaitCondition
+)
 from PyQt6.QtGui import QAction, QKeySequence
 
 from .core.demuxer import Demuxer
@@ -43,6 +45,72 @@ class LoadWorker(QThread):
             self.finished.emit(False, str(e))
 
 
+class DecodeWorker(QThread):
+    """Serializes all decoder access on one thread.
+
+    PyAV's decoder is not thread-safe and decoding a 4K frame takes long
+    enough to stall the UI, so every decode runs here instead. Only the most
+    recent request is served -- intermediate requests during rapid scrubbing
+    are dropped. The shared lock is also held by open()/close() on the UI
+    thread, so decoder lifecycle never overlaps a decode.
+    """
+
+    ready = pyqtSignal(int, object, object)  # index, rgb|None, analysis|None
+
+    def __init__(self, decoder: Decoder, lock: QMutex):
+        super().__init__()
+        self._decoder = decoder
+        self._lock = lock
+        self._mutex = QMutex()
+        self._cond = QWaitCondition()
+        self._pending = -1
+        self._abort = False
+
+    def request(self, index: int) -> None:
+        self._mutex.lock()
+        self._pending = index
+        self._cond.wakeAll()
+        self._mutex.unlock()
+
+    def stop(self) -> None:
+        self._mutex.lock()
+        self._abort = True
+        self._cond.wakeAll()
+        self._mutex.unlock()
+        self.wait()
+
+    def run(self) -> None:
+        while True:
+            self._mutex.lock()
+            while self._pending < 0 and not self._abort:
+                self._cond.wait(self._mutex)
+            if self._abort:
+                self._mutex.unlock()
+                return
+            index = self._pending
+            self._pending = -1
+            self._mutex.unlock()
+
+            rgb = analysis = None
+            self._lock.lock()
+            try:
+                if self._decoder.is_open:
+                    rgb = self._decoder.decode_frame(index)
+                    if rgb is not None:
+                        analysis = self._decoder.get_analysis(index)
+            except Exception:
+                rgb = analysis = None
+            finally:
+                self._lock.unlock()
+
+            # Drop this result if a newer frame was already requested.
+            self._mutex.lock()
+            superseded = self._pending >= 0
+            self._mutex.unlock()
+            if not superseded:
+                self.ready.emit(index, rgb, analysis)
+
+
 class MainWindow(QMainWindow):
     """Main application window with dockable panels."""
 
@@ -52,6 +120,13 @@ class MainWindow(QMainWindow):
         self._demuxer = Demuxer()
         self._decoder = Decoder()
         self._current_file = ""
+
+        # Off-UI-thread decoding. _decode_lock serializes all decoder access
+        # (worker decodes; open/close hold it on the UI thread).
+        self._decode_lock = QMutex()
+        self._decode_worker = DecodeWorker(self._decoder, self._decode_lock)
+        self._decode_worker.ready.connect(self._on_frame_decoded)
+        self._decode_worker.start()
 
         # Playback state
         self._play_timer = QTimer(self)
@@ -414,8 +489,14 @@ class MainWindow(QMainWindow):
             # Refine frame types using NAL parsing
             self._refine_frame_types(on_progress)
 
-            # Open decoder with frame list for keyframe-aware seeking
-            if not self._decoder.open(file_path, frames=self._demuxer.frames):
+            # Open decoder with frame list for keyframe-aware seeking. Hold the
+            # decode lock so it never overlaps a decode running on the worker.
+            self._decode_lock.lock()
+            try:
+                decoder_ok = self._decoder.open(file_path, frames=self._demuxer.frames)
+            finally:
+                self._decode_lock.unlock()
+            if not decoder_ok:
                 QMessageBox.warning(self, "Warning", "Failed to open decoder. Frame display will be unavailable.")
 
             # Update views
@@ -526,15 +607,8 @@ class MainWindow(QMainWindow):
         # Update bar chart selection
         self._barchart_view.select_frame(index)
 
-        # Decode and display frame (with block analysis from same pass)
-        if self._decoder.is_open:
-            rgb_array = self._decoder.decode_frame(index)
-            if rgb_array is not None:
-                analysis = self._decoder.get_analysis(index)
-                self._decoded_view.display_frame(rgb_array, index, analysis)
-                self._block_info_view.set_analysis(analysis)
-
-        # During playback, skip expensive NALU/hex updates
+        # NALU/hex views are cheap and independent of decoding; update them
+        # immediately for instant feedback. Skip during playback.
         if not self._is_playing:
             self._update_analysis_views(frame)
 
@@ -542,6 +616,18 @@ class MainWindow(QMainWindow):
             f"Frame {index} | {frame.frame_type.value}-frame | "
             f"{frame.size:,} bytes"
         )
+
+        # Decode the picture (and its block analysis) off the UI thread; the
+        # latest request wins so rapid scrubbing stays responsive.
+        if self._decoder.is_open:
+            self._decode_worker.request(index)
+
+    def _on_frame_decoded(self, index: int, rgb, analysis):
+        """Receive a decoded frame from the worker (UI thread via signal)."""
+        if index != self._current_index or rgb is None:
+            return  # stale result for a frame the user already moved past
+        self._decoded_view.display_frame(rgb, index, analysis)
+        self._block_info_view.set_analysis(analysis)
 
     def _update_analysis_views(self, frame: 'FrameInfo'):
         """Load packet data on demand and update NALU & hex views."""
@@ -672,7 +758,14 @@ class MainWindow(QMainWindow):
         if (not self._is_playing and self._current_index >= 0
                 and (ready != self._last_ready
                      or (terminal and not self._analysis_finalized))):
-            analysis = self._decoder.get_analysis(self._current_index)
+            # The current frame is cached, so get_analysis only refills its
+            # sidecar fields (no container decode); still take the lock so it
+            # never races a worker decode touching the shared cache/sidecar.
+            self._decode_lock.lock()
+            try:
+                analysis = self._decoder.get_analysis(self._current_index)
+            finally:
+                self._decode_lock.unlock()
             if analysis is not None:
                 self._decoded_view.refresh_overlays(analysis)
                 self._block_info_view.set_analysis(analysis)
@@ -720,6 +813,11 @@ class MainWindow(QMainWindow):
         """Handle window close."""
         self._pause_playback()
         self._analysis_timer.stop()
+        self._decode_worker.stop()  # join before tearing down the decoder
         self._demuxer.close()
-        self._decoder.close()
+        self._decode_lock.lock()
+        try:
+            self._decoder.close()
+        finally:
+            self._decode_lock.unlock()
         event.accept()
