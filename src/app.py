@@ -625,15 +625,21 @@ class MainWindow(QMainWindow):
 
         if immediate:
             # Synchronous decode for smooth, in-order, timer-paced playback.
+            # Block analysis (QP/MV grids) is costly per frame for HEVC/AV1, so
+            # skip it during playback unless an overlay actually needs it; the
+            # block panel/overlays refresh on pause.
+            want_analysis = self._decoded_view.has_overlays()
             self._decode_lock.lock()
             try:
                 rgb = self._decoder.decode_frame(index)
-                analysis = self._decoder.get_analysis(index) if rgb is not None else None
+                analysis = (self._decoder.get_analysis(index)
+                            if rgb is not None and want_analysis else None)
             finally:
                 self._decode_lock.unlock()
             if rgb is not None:
                 self._decoded_view.display_frame(rgb, index, analysis)
-                self._block_info_view.set_analysis(analysis)
+                if want_analysis:
+                    self._block_info_view.set_analysis(analysis)
         else:
             # Interactive: decode off the UI thread; latest request wins so
             # rapid scrubbing stays responsive.
@@ -734,11 +740,15 @@ class MainWindow(QMainWindow):
         self._play_action.setText("▶ Play")
         self._play_action.setToolTip("Play (Space)")
 
-        # Refresh NALU/hex views that were skipped during playback
+        # Refresh views skipped during playback: NALU/hex now, and the block
+        # analysis (overlay + block panel) via the worker, since playback only
+        # decoded the picture.
         if was_playing and self._demuxer.is_open:
             idx = self._barchart_view.selected_index
             if 0 <= idx < len(self._demuxer.frames):
                 self._update_analysis_views(self._demuxer.frames[idx])
+                if self._decoder.is_open:
+                    self._decode_worker.request(idx)
 
     def _stop_playback(self):
         """Stop playback and return to first frame."""

@@ -87,6 +87,10 @@ class DecodedView(QWidget):
         self._update_display()
         self._update_info()
 
+    def has_overlays(self) -> bool:
+        """True if any analysis overlay is currently enabled."""
+        return any(self._overlay_flags.values())
+
     def set_overlays(self, flags: dict) -> None:
         """Enable/disable overlay layers, e.g. {'qp': True, 'mv': False}."""
         for key, value in flags.items():
