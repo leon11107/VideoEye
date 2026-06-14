@@ -11,6 +11,58 @@ from .frame_info import FrameInfo
 from ..analysis import FrameAnalysis, create_extractor
 from ..analysis.block_sidecar import BlockSidecar
 
+# PyAV format names for raw elementary streams (no container index, repeated
+# parameter sets at each IDR) that support byte-offset random seek.
+_RAW_FORMATS = frozenset(
+    {"h264", "hevc", "av1", "obu", "ivf", "m4v", "mpegvideo", "vc1", "h261", "h263"}
+)
+
+
+class _SlicedFile:
+    """Read-only file view that starts at a byte offset and reports it as 0.
+
+    Feeding this to ``av.open`` makes a raw elementary stream appear to begin
+    at a chosen keyframe: FFmpeg's probing and seeking stay within the slice
+    instead of roaming the whole file, so the packet sequence is exactly the
+    keyframe's GOP onward. Reaching frame 0 of the slice = the keyframe's
+    first byte, which is the only well-defined entry point for a clean decode.
+    """
+
+    def __init__(self, path: str, start: int):
+        self._f = open(path, "rb")
+        self._start = start
+        self._f.seek(0, 2)
+        self._end = self._f.tell()
+        self._f.seek(start)
+
+    def read(self, n: int = -1) -> bytes:
+        return self._f.read(n)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            pos = self._start + offset
+        elif whence == 1:
+            pos = self._f.tell() + offset
+        elif whence == 2:
+            pos = self._end + offset
+        else:
+            pos = self._f.tell()
+        pos = max(self._start, min(pos, self._end))
+        self._f.seek(pos, 0)
+        return self._f.tell() - self._start
+
+    def tell(self) -> int:
+        return self._f.tell() - self._start
+
+    def seekable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        try:
+            self._f.close()
+        except Exception:
+            pass
+
 
 class Decoder:
     """Decodes video frames to RGB images with smart seeking and LRU cache.
@@ -38,6 +90,9 @@ class Decoder:
         self._container: Optional[av.container.InputContainer] = None
         self._video_stream: Optional[av.video.stream.VideoStream] = None
         self._file_path: str = ""
+        # File handle backing a byte-offset open (None when opened by path).
+        # Owned by us and closed alongside the container.
+        self._fileobj = None
         # Decode cursor: index of the last successfully decoded frame
         self._decode_pos: int = -1
         # Active demux iterator (kept alive for sequential access)
@@ -50,9 +105,18 @@ class Decoder:
         self._extractor = None
         # Patched-FFmpeg block-partition sidecar (None if helper unavailable)
         self._block_sidecar: Optional[BlockSidecar] = None
-        # Keyframe index (decode order) for nearest-keyframe lookup. Built by
-        # parsing the stream at open; never relies on container timestamps.
+        # Keyframe index (decode order) for nearest-keyframe lookup, plus each
+        # keyframe's byte offset for O(1) random seek. Built by parsing the
+        # stream at open; never relies on container timestamps.
         self._keyframe_indices: list[int] = []
+        self._keyframe_pos: dict[int, int] = {}
+        # Raw elementary stream (Annex-B / OBU)? These have no container index
+        # and cannot be seeked, so we reach keyframes by byte offset instead
+        # of re-parsing from the start on every jump.
+        self._raw_stream: bool = False
+        # Demuxer format name, used as the format hint when reopening a raw
+        # stream at a byte offset (probing a mid-stream slice is ambiguous).
+        self._format_name: str = ""
         # Hardware accel info
         self._hw_accel: str = "software"
 
@@ -68,11 +132,9 @@ class Decoder:
             self.close()
             self._file_path = file_path
 
-            # Build keyframe index from demuxer frame list
+            # Build keyframe index (+ byte offsets) from demuxer frame list
             if frames:
-                self._keyframe_indices = sorted(
-                    f.index for f in frames if f.is_keyframe
-                )
+                self._build_keyframe_index(frames)
 
             # Software decoding only: block-level side data (QP, MVs) is
             # produced by the software decoder, never by hwaccel paths.
@@ -85,6 +147,12 @@ class Decoder:
 
             if not self._video_stream:
                 raise ValueError("No video stream found")
+
+            # Raw elementary streams repeat parameter sets at each IDR, so we
+            # can open mid-file by byte offset; seekable containers must not be
+            # opened that way (FFmpeg would re-probe from the start).
+            self._format_name = (self._container.format.name or "").lower()
+            self._raw_stream = self._format_name in _RAW_FORMATS
 
             # Configure block analysis extraction for this codec.
             # Codec options must be set before the decoder opens.
@@ -127,13 +195,7 @@ class Decoder:
     def close(self) -> None:
         """Close the decoder and release resources."""
         self._packet_iter = None
-        if self._container:
-            try:
-                self._container.close()
-            except Exception:
-                pass
-        self._container = None
-        self._video_stream = None
+        self._close_container()
         self._extractor = None
         # Stop the background block-analysis helper and join its thread so a
         # closed file never leaves an orphaned probe process running.
@@ -146,6 +208,25 @@ class Decoder:
         self._decode_pos = -1
         self._frame_cache.clear()
         self._keyframe_indices.clear()
+        self._keyframe_pos.clear()
+        self._raw_stream = False
+        self._format_name = ""
+
+    def _close_container(self) -> None:
+        """Close the active container and any byte-offset file handle."""
+        if self._container:
+            try:
+                self._container.close()
+            except Exception:
+                pass
+        self._container = None
+        self._video_stream = None
+        if self._fileobj is not None:
+            try:
+                self._fileobj.close()
+            except Exception:
+                pass
+        self._fileobj = None
 
     def decode_frame(self, frame_index: int) -> Optional[np.ndarray]:
         """Decode a specific frame by index, returning RGB numpy array."""
@@ -243,20 +324,18 @@ class Decoder:
     def _seek_to_keyframe(self, target_index: int) -> None:
         """Position the decoder at the nearest keyframe at or before target.
 
-        Never trusts container timestamps. The keyframe index is built by
-        parsing the whole stream at open, so we locate the keyframe by its
-        decode-order position and reach it by *parsing* (demux only, no
-        decode) — reopening first for a clean decoder so no stale reorder-
-        buffer frames leak across the jump. This is one uniform path for
-        container and raw elementary streams alike; raw demuxers cannot seek
-        at all, so forward parsing is the only correct way to reach a frame.
+        Never trusts container timestamps. The keyframe index (and each
+        keyframe's byte offset) is built by parsing the whole stream at open.
+        We reach the keyframe by one of two means, both giving a clean
+        decoder so no stale reorder-buffer frames leak across the jump:
+
+        - Byte-offset seek (raw elementary streams): jump the file straight to
+          the keyframe's bytes — O(1), no re-parsing. Valid because raw
+          streams repeat parameter sets at each IDR.
+        - Parse-skip (containers, or when byte-seek is unavailable): reopen and
+          demux past the preceding packets without decoding them.
         """
-        # Nearest preceding keyframe from the parsed index.
-        if self._keyframe_indices:
-            pos = bisect.bisect_right(self._keyframe_indices, target_index) - 1
-            kf_index = self._keyframe_indices[max(0, pos)]
-        else:
-            kf_index = 0
+        kf_index, kf_pos = self._nearest_keyframe(target_index)
 
         # Already positioned inside this GOP and before the target: keep
         # decoding forward from here rather than reparsing from the start.
@@ -266,11 +345,56 @@ class Decoder:
         ):
             return
 
-        # Reopen for a fresh decoder, then parse-skip to the keyframe packet.
+        # Fast path: byte-offset seek straight to the keyframe (raw streams).
+        if self._raw_stream and kf_pos is not None and self._open_at_offset(kf_pos):
+            self._packet_iter = self._container.demux(self._video_stream)
+            self._decode_pos = kf_index - 1
+            return
+
+        # Fallback: reopen for a fresh decoder, then parse-skip to the keyframe.
         self._reopen()
         self._packet_iter = self._container.demux(self._video_stream)
         self._skip_packets_to(kf_index)
         self._decode_pos = kf_index - 1
+
+    def _nearest_keyframe(self, target_index: int) -> tuple[int, Optional[int]]:
+        """Decode-order index and byte offset of the nearest keyframe <= target.
+
+        Returns (0, None) when no keyframe index is available, so the caller
+        falls back to parsing from the very start (always a correct anchor).
+        """
+        if not self._keyframe_indices:
+            return 0, None
+        pos = bisect.bisect_right(self._keyframe_indices, target_index) - 1
+        kf_index = self._keyframe_indices[max(0, pos)]
+        return kf_index, self._keyframe_pos.get(kf_index)
+
+    def _open_at_offset(self, byte_pos: int) -> bool:
+        """Open the stream positioned at a byte offset for O(1) random seek.
+
+        Feeds PyAV a sliced view that begins at the keyframe's bytes, so the
+        demuxer reads parameter sets and the IDR slice directly from there.
+        Only used for raw elementary streams. Returns False on any error so
+        the caller can fall back to parse-skip.
+
+        Note: for open-GOP keyframes (HEVC CRA) the slice cannot reconstruct
+        the leading pictures, so the forward decode simply will not reach such
+        a target; the decode-from-start safety net in _get_entry then produces
+        the correct frame. So this stays correct, just not always O(1).
+        """
+        try:
+            self._close_container()
+            sliced = _SlicedFile(self._file_path, byte_pos)
+            self._fileobj = sliced
+            if self._format_name:
+                self._container = av.open(sliced, format=self._format_name)
+            else:
+                self._container = av.open(sliced)
+            self._configure_stream()
+            return self._video_stream is not None
+        except Exception:
+            self._close_container()
+            return False
 
     def _skip_packets_to(self, kf_index: int) -> None:
         """Advance the demux iterator past the first kf_index packets without
@@ -291,12 +415,18 @@ class Decoder:
                 return
 
     def _reopen(self) -> None:
-        """Reopen the container from scratch (fallback for unseekable input)."""
-        try:
-            self._container.close()
-        except Exception:
-            pass
+        """Reopen the container from the start (parse-skip seek path)."""
+        self._close_container()
         self._container = av.open(self._file_path)
+        self._configure_stream()
+
+    def _configure_stream(self) -> None:
+        """Bind the video stream and re-apply decoder options + threading.
+
+        Shared by the parse-skip reopen and the byte-offset open so both
+        produce an identically configured decoder (analysis side data on,
+        multi-threaded).
+        """
         self._video_stream = next(
             (s for s in self._container.streams if s.type == "video"), None
         )
@@ -370,9 +500,20 @@ class Decoder:
 
     def set_keyframe_index(self, frames: list[FrameInfo]) -> None:
         """Update keyframe index from a frame list (e.g. after loading)."""
-        self._keyframe_indices = sorted(
-            f.index for f in frames if f.is_keyframe
-        )
+        self._build_keyframe_index(frames)
+
+    def _build_keyframe_index(self, frames: list[FrameInfo]) -> None:
+        """Build the sorted keyframe index and its byte-offset map.
+
+        A keyframe contributes a byte offset only when one was recorded
+        (raw streams); without it the seek falls back to parse-skip.
+        """
+        self._keyframe_indices = sorted(f.index for f in frames if f.is_keyframe)
+        self._keyframe_pos = {
+            f.index: f.pos
+            for f in frames
+            if f.is_keyframe and f.pos is not None
+        }
 
     @property
     def hw_accel(self) -> str:

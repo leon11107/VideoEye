@@ -20,6 +20,7 @@ class FrameInfo:
     index: int  # Frame index in stream
     pts: Optional[int] = None  # Presentation timestamp
     dts: Optional[int] = None  # Decode timestamp
+    pos: Optional[int] = None  # Byte offset of the packet in the file
     duration: Optional[int] = None  # Frame duration in time_base units
     size: int = 0  # Frame size in bytes
     is_keyframe: bool = False  # Is this a keyframe/IDR

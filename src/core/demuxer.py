@@ -392,6 +392,7 @@ class Demuxer:
                 index=frame_index,
                 pts=packet.pts,
                 dts=packet.dts,
+                pos=packet.pos if packet.pos is not None and packet.pos >= 0 else None,
                 duration=packet.duration,
                 size=packet.size,
                 is_keyframe=is_key,
