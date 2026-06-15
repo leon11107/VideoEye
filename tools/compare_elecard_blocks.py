@@ -1,6 +1,6 @@
 """Compare our first-frame block-level info against an Elecard CSV dump.
 
-Usage: py -3.14 tools/compare_elecard_blocks.py <elecard_csv> <our.veblk>
+Usage: py -3.14 tools/compare_elecard_blocks.py <elecard_csv> <our.veblk> [frame]
 
 Elecard CSV structure (HEVC): a 'name;value;' stream. Per LCU it emits an
 `lcu ...` header, then for each CU a `cu type` + `cu size` line, and a flat
@@ -18,8 +18,10 @@ from src.analysis.veye_sidecar import (
     load_sidecar, bit_sizes_from_frame, blocks_from_frame,
     intra_modes_from_frame, qp_grid_from_frame,
 )
+from src.analysis.schema import PredType
 
 csv_path, veblk = sys.argv[1], sys.argv[2]
+frame_idx = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
 cus = {}          # (x,y) -> dict, per CU (reliable fields)
 lcu_first = {}    # (x,y) -> {qp, mode}, only first CU of each LCU
@@ -57,8 +59,13 @@ with open(csv_path, encoding="utf-8", errors="replace") as fh:
 
 print(f"CSV: {len(cus)} CUs, {len(lcu_first)} LCUs")
 
-fb = load_sidecar(veblk)[0]
+from src.analysis.veye_sidecar import mvs_from_frame
+fb = load_sidecar(veblk)[frame_idx]
 unit = fb.block_unit
+_b = blocks_from_frame(fb)
+_mix = {PredType.NAMES.get(int(k), int(k)): int(v)
+        for k, v in zip(*np.unique(_b["pred"], return_counts=True))} if len(_b) else {}
+print(f"our frame {frame_idx} block pred mix: {_mix}  MVs: {len(mvs_from_frame(fb))}")
 our = {(int(r["x"]), int(r["y"])): r for r in bit_sizes_from_frame(fb)}
 blk = {(int(r["x"]), int(r["y"])): r for r in blocks_from_frame(fb)}
 imode = {(int(r["x"]), int(r["y"])): int(r["mode"]) for r in intra_modes_from_frame(fb)}
