@@ -23,6 +23,39 @@ _SECTION_BG = QColor("#2d5a88")
 _SECTION_FG = QColor("#ffffff")
 
 
+def _make_kv_tree() -> QTreeWidget:
+    """A name|value tree styled for the analysis panels."""
+    tree = QTreeWidget()
+    tree.setColumnCount(2)
+    tree.setHeaderLabels(["name", "value"])
+    tree.setRootIsDecorated(False)
+    tree.setIndentation(12)
+    tree.setAlternatingRowColors(True)
+    tree.setUniformRowHeights(True)
+    tree.setStyleSheet(
+        "QTreeWidget { font-family: Consolas, monospace; }"
+        "QTreeWidget::item { height: 18px; }"
+    )
+    tree.header().setStretchLastSection(True)
+    return tree
+
+
+def _kv_section(tree: QTreeWidget, title: str) -> QTreeWidgetItem:
+    """Add a bold, colored section header row."""
+    item = QTreeWidgetItem(tree, [title, ""])
+    font = item.font(0)
+    font.setBold(True)
+    for col in (0, 1):
+        item.setBackground(col, QBrush(_SECTION_BG))
+        item.setForeground(col, QBrush(_SECTION_FG))
+        item.setFont(col, font)
+    return item
+
+
+def _kv_row(parent: QTreeWidgetItem, name: str, value: str) -> None:
+    QTreeWidgetItem(parent, [name, value])
+
+
 class OverlayControls(QWidget):
     """Overlay enable/disable toggles."""
 
@@ -135,64 +168,72 @@ class OverlayPanel(QWidget):
 
 
 class FrameStatsPanel(QWidget):
-    """Per-frame block-analysis statistics."""
+    """Per-frame block-analysis statistics, as a sectioned name|value table
+    (same presentation as the cursor Block Info panel)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        self._stats_label = QLabel("No analysis data")
-        self._stats_label.setWordWrap(True)
-        self._stats_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._stats_label.setStyleSheet("font-family: Consolas, monospace;")
-        layout.addWidget(self._stats_label)
-        layout.addStretch()
+        layout.setContentsMargins(4, 4, 4, 4)
+        self._tree = _make_kv_tree()
+        layout.addWidget(self._tree)
+        self._placeholder("No analysis data")
 
     def set_analysis(self, analysis) -> None:
         """Update per-frame statistics from a FrameAnalysis (or None)."""
+        self._tree.clear()
         if analysis is None:
-            self._stats_label.setText("No analysis data for this codec")
+            self._placeholder("No analysis data for this codec")
             return
 
-        lines = [
-            f"Codec: {analysis.codec}  Type: {analysis.pict_type}",
-            f"Size:  {analysis.width}x{analysis.height}"
-            f"  Unit: {analysis.qp_unit}px",
-        ]
+        pic = _kv_section(self._tree, "Picture")
+        _kv_row(pic, "codec", str(analysis.codec))
+        _kv_row(pic, "type", str(analysis.pict_type))
+        _kv_row(pic, "size", f"{analysis.width}x{analysis.height}")
+        _kv_row(pic, "unit", f"{analysis.qp_unit}px")
 
+        qp = _kv_section(self._tree, "QP")
         stats = analysis.qp_stats()
         if stats:
             qp_min, qp_max, qp_avg = stats
-            lines.append(f"QP:    min {qp_min}  max {qp_max}  avg {qp_avg:.1f}")
+            _kv_row(qp, "min", str(qp_min))
+            _kv_row(qp, "max", str(qp_max))
+            _kv_row(qp, "avg", f"{qp_avg:.1f}")
         else:
-            lines.append("QP:    n/a")
+            _kv_row(qp, "value", "n/a")
 
-        if analysis.mvs is not None and len(analysis.mvs) > 0:
-            m = analysis.mvs
+        mvsec = _kv_section(self._tree, "Motion")
+        m = analysis.mvs
+        if m is not None and len(m) > 0:
             n_l0 = int(np.count_nonzero(m["list"] == 0))
-            n_l1 = len(m) - n_l0
             mag = np.hypot(m["mv_x"], m["mv_y"])
-            lines.append(f"MV:    {len(m)} (L0 {n_l0} / L1 {n_l1})")
-            lines.append(f"|MV|:  avg {mag.mean():.1f}px  max {mag.max():.1f}px")
+            _kv_row(mvsec, "vectors", str(len(m)))
+            _kv_row(mvsec, "L0 / L1", f"{n_l0} / {len(m) - n_l0}")
+            _kv_row(mvsec, "|MV| avg", f"{mag.mean():.1f}px")
+            _kv_row(mvsec, "|MV| max", f"{mag.max():.1f}px")
         else:
-            lines.append("MV:    none (intra frame or n/a)")
+            _kv_row(mvsec, "vectors", "none (intra / n/a)")
 
-        if analysis.blocks is not None and len(analysis.blocks) > 0:
-            b = analysis.blocks
-            n = len(b)
-            intra = int(np.count_nonzero(b["pred"] == PredType.INTRA))
-            inter = int(np.count_nonzero(b["pred"] == PredType.INTER))
-            bi = int(np.count_nonzero(b["pred"] == PredType.BI))
-            skip = int(np.count_nonzero(b["pred"] == PredType.SKIP))
-            lines.append(f"Blocks: {n}  intra {intra} / inter {inter}"
-                         f" / bi {bi} / skip {skip}")
+        blk = _kv_section(self._tree, "Blocks")
+        b = analysis.blocks
+        if b is not None and len(b) > 0:
+            _kv_row(blk, "total", str(len(b)))
+            _kv_row(blk, "intra", str(int(np.count_nonzero(b["pred"] == PredType.INTRA))))
+            _kv_row(blk, "inter", str(int(np.count_nonzero(b["pred"] == PredType.INTER))))
+            _kv_row(blk, "bi", str(int(np.count_nonzero(b["pred"] == PredType.BI))))
+            _kv_row(blk, "skip", str(int(np.count_nonzero(b["pred"] == PredType.SKIP))))
         else:
-            lines.append("Partition/Types: pending patched-FFmpeg backend")
+            _kv_row(blk, "partition", "pending patched-FFmpeg backend")
 
-        self._stats_label.setText("\n".join(lines))
+        self._tree.expandAll()
+
+    def _placeholder(self, text: str) -> None:
+        item = QTreeWidgetItem(self._tree, [text, ""])
+        item.setForeground(0, QBrush(QColor("#888888")))
 
     def clear(self) -> None:
-        self._stats_label.setText("No analysis data")
+        self._tree.clear()
+        self._placeholder("No analysis data")
 
 
 class BlockHoverPanel(QWidget):
@@ -202,18 +243,7 @@ class BlockHoverPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        self._tree = QTreeWidget()
-        self._tree.setColumnCount(2)
-        self._tree.setHeaderLabels(["name", "value"])
-        self._tree.setRootIsDecorated(False)
-        self._tree.setIndentation(12)
-        self._tree.setAlternatingRowColors(True)
-        self._tree.setUniformRowHeights(True)
-        self._tree.setStyleSheet(
-            "QTreeWidget { font-family: Consolas, monospace; }"
-            "QTreeWidget::item { height: 18px; }"
-        )
-        self._tree.header().setStretchLastSection(True)
+        self._tree = _make_kv_tree()
         layout.addWidget(self._tree)
         self._set_tree_placeholder("Hover over the frame")
 
@@ -271,20 +301,13 @@ class BlockHoverPanel(QWidget):
         self._tree.clear()
         self._set_tree_placeholder("Hover over the frame")
 
-    # -- tree helpers -----------------------------------------------------
+    # -- tree helpers (shared module-level builders) ----------------------
 
     def _section(self, title: str) -> QTreeWidgetItem:
-        item = QTreeWidgetItem(self._tree, [title, ""])
-        font = item.font(0)
-        font.setBold(True)
-        for col in (0, 1):
-            item.setBackground(col, QBrush(_SECTION_BG))
-            item.setForeground(col, QBrush(_SECTION_FG))
-            item.setFont(col, font)
-        return item
+        return _kv_section(self._tree, title)
 
     def _row(self, parent: QTreeWidgetItem, name: str, value: str) -> None:
-        QTreeWidgetItem(parent, [name, value])
+        _kv_row(parent, name, value)
 
     def _set_tree_placeholder(self, text: str) -> None:
         item = QTreeWidgetItem(self._tree, [text, ""])
