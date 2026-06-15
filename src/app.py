@@ -576,7 +576,9 @@ class MainWindow(QMainWindow):
         # Lazy-load packet data (only one packet in memory at a time)
         packet_data = self._demuxer.read_packet_data(frame.index)
         self._stream_viewer.display_frame(frame, packet_data)
-        self._hex_viewer.set_data(packet_data)
+        # base_addr = the packet's absolute byte offset in the file, so the
+        # hex address column reads as the frame's position in the bitstream.
+        self._hex_viewer.set_data(packet_data, base_addr=frame.pos or 0)
 
     def _update_ref_markers(self, index: int) -> None:
         """Mark frame `index`'s reference frames on the chart (or clear)."""

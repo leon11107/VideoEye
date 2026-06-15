@@ -23,6 +23,11 @@ class HexViewer(QWidget):
         self._highlight_start = -1
         self._highlight_end = -1
         self._win_start = 0  # byte offset of the first rendered line
+        # Absolute byte offset of self._data[0] in the source file, added to
+        # the rendered address column so it reads as the packet's position in
+        # the bitstream rather than 0-based within this packet. Highlight and
+        # scroll offsets stay relative to self._data.
+        self._base_addr = 0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -69,9 +74,16 @@ class HexViewer(QWidget):
 
         layout.addWidget(self._text_edit)
 
-    def set_data(self, data: bytes, highlight_start: int = -1, highlight_end: int = -1) -> None:
-        """Set data to display."""
+    def set_data(self, data: bytes, highlight_start: int = -1,
+                 highlight_end: int = -1, base_addr: int = 0) -> None:
+        """Set data to display.
+
+        `base_addr` is the absolute file offset of `data[0]`; it is added to
+        the displayed address column only. `highlight_*` stay relative to
+        `data` (0-based within the packet).
+        """
         self._data = data
+        self._base_addr = base_addr if base_addr and base_addr > 0 else 0
         self._highlight_start = highlight_start
         self._highlight_end = highlight_end
         self._win_start = self._window_for(highlight_start if highlight_start >= 0 else 0)
@@ -102,12 +114,13 @@ class HexViewer(QWidget):
         total = len(self._data)
         win_start = self._win_start
         win_end = min(total, win_start + self.WINDOW_BYTES)
+        addr = f"@ 0x{self._base_addr:08X}  " if self._base_addr else ""
         if win_start > 0 or win_end < total:
             self._info_label.setText(
-                f"{total:,} bytes (showing {win_start:,}-{win_end:,})"
+                f"{addr}{total:,} bytes (showing {win_start:,}-{win_end:,})"
             )
         else:
-            self._info_label.setText(f"{total:,} bytes")
+            self._info_label.setText(f"{addr}{total:,} bytes")
 
         # Build hex dump text with HTML formatting, for the window only.
         lines = []
@@ -116,8 +129,9 @@ class HexViewer(QWidget):
         while offset < win_end:
             chunk = self._data[offset:offset + bpl]
 
-            # Offset column
-            offset_str = f'<span style="color: #569cd6;">{offset:08X}</span>'
+            # Offset column (absolute file address: base + window offset)
+            offset_str = (f'<span style="color: #569cd6;">'
+                          f'{self._base_addr + offset:08X}</span>')
 
             # Hex bytes
             hex_parts = []
