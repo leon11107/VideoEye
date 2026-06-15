@@ -147,6 +147,11 @@ class DecodedView(QWidget):
         """True if any analysis overlay is currently enabled."""
         return any(self._overlay_flags.values())
 
+    def needed_layers(self) -> set:
+        """Sidecar analysis layers required by the currently enabled overlays."""
+        from .overlay import needed_layers
+        return needed_layers(self._overlay_flags)
+
     def set_overlays(self, flags: dict) -> None:
         """Enable/disable overlay layers, e.g. {'qp': True, 'mv': False}."""
         for key, value in flags.items():

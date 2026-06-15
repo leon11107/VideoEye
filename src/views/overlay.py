@@ -235,3 +235,29 @@ ALL_OVERLAY_KEYS = (
     tuple(OVERLAYS) + (PARTITION_KEY,) + tuple(k for k, _ in PARTITION_LAYERS)
 )
 DEFAULT_ON = ("part_pu",)
+
+
+def needed_layers(flags: dict) -> set:
+    """Sidecar analysis layers required to render the enabled overlays. Lets the
+    playback path build only what is shown -- the per-cell layer builds (TU is
+    ~40 ms/frame at 1080p) are skipped when their overlay is off."""
+    need: set = set()
+    if flags.get("qp"):
+        need.add("qp")
+    if flags.get("mv"):
+        need.add("mvs")
+    if flags.get("types") or flags.get("blocksize"):
+        need.add("blocks")
+    if flags.get(PARTITION_KEY):
+        need.add("blocks")          # CU base is always drawn with partition
+        if flags.get("part_pu"):
+            need.add("pu")
+        if flags.get("part_tu_luma"):
+            need.add("tu_luma")
+        if flags.get("part_tu_chroma"):
+            need.add("tu_chroma")
+    if flags.get("slice"):
+        need.add("slice")
+    if flags.get("tile"):
+        need.add("tile")
+    return need

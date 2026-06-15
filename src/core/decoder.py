@@ -17,6 +17,11 @@ _RAW_FORMATS = frozenset(
     {"h264", "hevc", "av1", "obu", "ivf", "m4v", "mpegvideo", "vc1", "h261", "h263"}
 )
 
+# Sidecar-derived analysis layers get_analysis can build. None == all of them.
+_ALL_ANALYSIS_LAYERS = frozenset(
+    {"blocks", "pu", "tu_luma", "tu_chroma", "slice", "tile", "mvs", "qp"}
+)
+
 
 class _SlicedFile:
     """Read-only file view that starts at a byte offset and reports it as 0.
@@ -267,8 +272,18 @@ class Decoder:
         entry = self._get_entry(frame_index)
         return entry[0] if entry else None
 
-    def get_analysis(self, frame_index: int) -> Optional[FrameAnalysis]:
-        """Block-level analysis for a frame (decodes it if needed)."""
+    def get_analysis(self, frame_index: int,
+                     need: Optional[set] = None) -> Optional[FrameAnalysis]:
+        """Block-level analysis for a frame (decodes it if needed).
+
+        Building each overlay layer from the sidecar is a per-cell Python pass
+        (TU layers alone are ~40 ms on a 1080p frame), so during playback only
+        the layers actually shown should be requested. `need` is a set of layer
+        keys ("blocks", "pu", "tu_luma", "tu_chroma", "slice", "tile", "mvs",
+        "qp"); None means build everything (the default for paused inspection
+        and hover/click). Already-built layers are cached on the shared analysis
+        object, so a later full request fills in whatever a gated one skipped.
+        """
         entry = self._get_entry(frame_index)
         if not entry:
             return None
@@ -278,25 +293,26 @@ class Decoder:
         # not overwritten). The analysis object is shared with the cache, so
         # this populates the cached entry too (no re-fetch on later reads).
         if analysis is not None and self._block_sidecar is not None:
+            want = _ALL_ANALYSIS_LAYERS if need is None else need
             # The sidecar (patched-FFmpeg probe) keys frames in presentation
             # order; map the decode-order index to that rank so QP/MV overlay
             # data lines up with the decoded picture.
             sc_index = self._index_to_display.get(frame_index, frame_index)
-            if analysis.blocks is None:
+            if "blocks" in want and analysis.blocks is None:
                 analysis.blocks = self._block_sidecar.blocks_for(sc_index)
-            if analysis.pu is None:
+            if "pu" in want and analysis.pu is None:
                 analysis.pu = self._block_sidecar.pus_for(sc_index)
-            if analysis.tu_luma is None:
+            if "tu_luma" in want and analysis.tu_luma is None:
                 analysis.tu_luma = self._block_sidecar.tu_luma_for(sc_index)
-            if analysis.tu_chroma is None:
+            if "tu_chroma" in want and analysis.tu_chroma is None:
                 analysis.tu_chroma = self._block_sidecar.tu_chroma_for(sc_index)
-            if analysis.slice_lines is None:
+            if "slice" in want and analysis.slice_lines is None:
                 analysis.slice_lines = self._block_sidecar.slice_lines_for(sc_index)
-            if analysis.tile_lines is None:
+            if "tile" in want and analysis.tile_lines is None:
                 analysis.tile_lines = self._block_sidecar.tile_lines_for(sc_index)
-            if analysis.mvs is None:
+            if "mvs" in want and analysis.mvs is None:
                 analysis.mvs = self._block_sidecar.mvs_for(sc_index)
-            if analysis.qp_grid is None:
+            if "qp" in want and analysis.qp_grid is None:
                 grid = self._block_sidecar.qp_grid_for(sc_index)
                 if grid is not None:
                     analysis.qp_grid = grid

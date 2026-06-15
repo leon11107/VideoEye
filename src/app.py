@@ -691,12 +691,16 @@ class MainWindow(QMainWindow):
             return
 
         want_analysis = self._decoded_view.has_overlays()
+        # Build only the layers the active overlays actually draw -- the per-cell
+        # layer builds (TU ~40 ms/frame at 1080p) would otherwise stutter
+        # playback even for overlays that are switched off.
+        need = self._decoded_view.needed_layers() if want_analysis else None
         self._decode_lock.lock()
         try:
             res = self._decoder.decode_next()
             # Overlay needs sidecar fill; the frame is freshly cached so this
             # is a cache hit + sidecar lookup (only when an overlay is on).
-            analysis = (self._decoder.get_analysis(res[0])
+            analysis = (self._decoder.get_analysis(res[0], need)
                         if res is not None and want_analysis else
                         (res[2] if res is not None else None))
         finally:
