@@ -8,14 +8,18 @@ from PyQt6.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent
 
 from .overlay import (
-    OVERLAYS, DEFAULT_ON, ALL_OVERLAY_KEYS,
-    render_partition, render_motion_vectors, render_block_types,
+    OVERLAYS, OVERLAY_GROUPS, DEFAULT_ON, ALL_OVERLAY_KEYS,
+    render_partition, render_mode, render_block_types,
 )
 
-# All partition layers on -- used for the always-on hover inspection overlay.
+# Partition + mode layers on -- used for the always-on hover inspection overlay,
+# so hovering reveals the region's CU/PU/TU, MVs and intra direction regardless
+# of which overlays are toggled.
 _HOVER_FLAGS = {
     "partition": True, "part_pu": True,
     "part_tu_luma": True, "part_tu_chroma": True,
+    "mode": True, "mode_inter": True, "mode_intra_angular": True,
+    "mode_intra_plane": True, "mode_intra_dc": True,
 }
 
 
@@ -153,7 +157,7 @@ class DecodedView(QWidget):
         return needed_layers(self._overlay_flags)
 
     def set_overlays(self, flags: dict) -> None:
-        """Enable/disable overlay layers, e.g. {'qp': True, 'mv': False}."""
+        """Enable/disable overlay layers, e.g. {'qp': True, 'mode': False}."""
         for key, value in flags.items():
             if key in self._overlay_flags:
                 self._overlay_flags[key] = bool(value)
@@ -195,7 +199,8 @@ class DecodedView(QWidget):
             for key, (_label, render) in OVERLAYS.items():
                 if self._overlay_flags.get(key):
                     render(painter, self._analysis)
-            render_partition(painter, self._analysis, self._overlay_flags)
+            for _master, (_label, _subs, render) in OVERLAY_GROUPS.items():
+                render(painter, self._analysis, self._overlay_flags)
         except Exception as e:
             print(f"Overlay rendering failed: {e}")
         finally:
@@ -280,7 +285,7 @@ class DecodedView(QWidget):
         painter.setClipRect(r)
         render_block_types(painter, region_an)
         render_partition(painter, region_an, _HOVER_FLAGS)
-        render_motion_vectors(painter, region_an)
+        render_mode(painter, region_an, _HOVER_FLAGS)
         painter.setClipping(False)
         # Outline the inspected region.
         painter.setPen(QPen(QColor(255, 255, 0, 200), 1.0))
@@ -305,6 +310,7 @@ class DecodedView(QWidget):
         ra.tu_luma = clip(a.tu_luma)
         ra.tu_chroma = clip(a.tu_chroma)
         ra.mvs = clip(a.mvs)
+        ra.intra = clip(a.intra)
         return ra
 
     def _update_display(self) -> None:

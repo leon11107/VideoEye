@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis import PredType, block_type_label, qp_field_name
-from .overlay import OVERLAYS, DEFAULT_ON, PARTITION_KEY, PARTITION_LAYERS
+from .overlay import OVERLAYS, DEFAULT_ON, OVERLAY_GROUPS
 
 # Elecard-like section header coloring.
 _SECTION_BG = QColor("#2d5a88")
@@ -74,6 +74,7 @@ class OverlayControls(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
+        # Independent flat overlays.
         for key, (label, _render) in OVERLAYS.items():
             cb = QCheckBox(label)
             cb.setChecked(key in DEFAULT_ON)  # before connect: no startup emit
@@ -81,41 +82,46 @@ class OverlayControls(QWidget):
             layout.addWidget(cb)
             self._checkboxes[key] = cb
 
-        # Partition: a master checkbox (enabling it always draws CU) plus an
-        # expand arrow that reveals the PU/TU refinement options.
-        part_row = QHBoxLayout()
-        part_row.setContentsMargins(0, 0, 0, 0)
-        self._part_btn = QToolButton()
-        self._part_btn.setCheckable(True)
-        self._part_btn.setStyleSheet("QToolButton { border: none; }")
-        self._part_btn.setArrowType(Qt.ArrowType.RightArrow)
-        self._part_btn.toggled.connect(self._on_partition_expand)
-        part_master = QCheckBox("Partition")
-        part_master.setChecked(PARTITION_KEY in DEFAULT_ON)
-        part_master.toggled.connect(self._on_toggled)
-        self._checkboxes[PARTITION_KEY] = part_master
-        part_row.addWidget(part_master)
-        part_row.addWidget(self._part_btn)
-        part_row.addStretch()
-        layout.addLayout(part_row)
+        # Collapsible groups (Partition / Mode / Boundary): a master checkbox +
+        # an expand arrow revealing the sub-layer options.
+        for master, (label, subs, _fn) in OVERLAY_GROUPS.items():
+            self._add_group(layout, master, label, subs)
 
-        self._part_container = QWidget()
-        part_layout = QVBoxLayout(self._part_container)
-        part_layout.setContentsMargins(28, 0, 0, 0)  # indent under "Partition"
-        for key, label in PARTITION_LAYERS:
-            cb = QCheckBox(label)
+    def _add_group(self, layout, master_key: str, label: str, subs) -> None:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        btn = QToolButton()
+        btn.setCheckable(True)
+        btn.setStyleSheet("QToolButton { border: none; }")
+        btn.setArrowType(Qt.ArrowType.RightArrow)
+        master_cb = QCheckBox(label)
+        master_cb.setChecked(master_key in DEFAULT_ON)
+        master_cb.toggled.connect(self._on_toggled)
+        self._checkboxes[master_key] = master_cb
+        row.addWidget(master_cb)
+        row.addWidget(btn)
+        row.addStretch()
+        layout.addLayout(row)
+
+        container = QWidget()
+        sub_layout = QVBoxLayout(container)
+        sub_layout.setContentsMargins(28, 0, 0, 0)  # indent under the master
+        for key, sub_label in subs:
+            cb = QCheckBox(sub_label)
             cb.setChecked(key in DEFAULT_ON)
             cb.toggled.connect(self._on_toggled)
-            part_layout.addWidget(cb)
+            sub_layout.addWidget(cb)
             self._checkboxes[key] = cb
-        self._part_container.setVisible(False)  # hidden until expanded
-        self._part_container.setEnabled(part_master.isChecked())
-        part_master.toggled.connect(self._part_container.setEnabled)
-        layout.addWidget(self._part_container)
+        container.setVisible(False)            # hidden until expanded
+        container.setEnabled(master_cb.isChecked())
+        master_cb.toggled.connect(container.setEnabled)
+        btn.toggled.connect(
+            lambda exp, b=btn, c=container: self._toggle_group(exp, b, c))
+        layout.addWidget(container)
 
-    def _on_partition_expand(self, expanded: bool):
-        self._part_container.setVisible(expanded)
-        self._part_btn.setArrowType(
+    def _toggle_group(self, expanded: bool, btn, container) -> None:
+        container.setVisible(expanded)
+        btn.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
 
     def _on_toggled(self):

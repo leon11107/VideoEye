@@ -326,38 +326,76 @@ def render_intra_plane(painter: QPainter, analysis: FrameAnalysis) -> None:
                 _INTRA_PLANE_COLOR, Qt.PenCapStyle.SquareCap)
 
 
-# Flat overlay registry: key -> (label, render function). Each is rendered
-# independently. The partition layers are handled separately (render_partition)
-# because they compose (CU base + PU/TU refinements) rather than stack.
+def render_mode(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
+    """Prediction-mode group: inter motion vectors + intra direction markers.
+    Drawn only when the 'mode' master is on; each sub-layer is independent."""
+    if not flags.get("mode"):
+        return
+    if flags.get("mode_inter"):
+        render_motion_vectors(painter, analysis)
+    if flags.get("mode_intra_angular"):
+        render_intra_angular(painter, analysis)
+    if flags.get("mode_intra_plane"):
+        render_intra_plane(painter, analysis)
+    if flags.get("mode_intra_dc"):
+        render_intra_dc(painter, analysis)
+
+
+def render_boundary(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
+    """Boundary group: HEVC slice and tile partition boundaries."""
+    if not flags.get("boundary"):
+        return
+    if flags.get("bnd_slice"):
+        render_slice_boundaries(painter, analysis)
+    if flags.get("bnd_tile"):
+        render_tile_boundaries(painter, analysis)
+
+
+# Flat overlay registry: key -> (label, render function). Each is independent.
 OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
-    "mv": ("Inter (MV)", render_motion_vectors),
-    "intra_angular": ("Intra Angular", render_intra_angular),
-    "intra_plane": ("Intra Plane", render_intra_plane),
-    "intra_dc": ("Intra DC", render_intra_dc),
     "types": ("Block Types", render_block_types),
     "blocksize": ("Block Size", render_block_size),
-    "slice": ("Slice Boundaries", render_slice_boundaries),
-    "tile": ("Tile Boundaries", render_tile_boundaries),
 }
 
-# Master flag: enabling partition always draws CU. PARTITION_LAYERS are the
-# optional refinements revealed when the partition menu is expanded (CU is not
-# listed -- it is implied by the master being on). key -> checkbox label.
+# Collapsible overlay groups (rendered like a menu, mirroring Partition):
+#   master_key -> (label, ((sub_key, sub_label), ...), render_fn)
+# render_fn(painter, analysis, flags) draws the group's enabled sub-layers and
+# itself checks the master flag. Partition is special: its master implies the CU
+# base; Mode/Boundary sub-layers are fully independent.
 PARTITION_KEY = "partition"
 PARTITION_LAYERS = (
     ("part_pu", "PU"),
     ("part_tu_luma", "TU (luma)"),
     ("part_tu_chroma", "TU (chroma)"),
 )
+OVERLAY_GROUPS = {
+    PARTITION_KEY: ("Partition", PARTITION_LAYERS, render_partition),
+    "mode": ("Mode", (
+        ("mode_inter", "Inter (MV)"),
+        ("mode_intra_angular", "Intra Angular"),
+        ("mode_intra_plane", "Intra Plane"),
+        ("mode_intra_dc", "Intra DC"),
+    ), render_mode),
+    "boundary": ("Boundary", (
+        ("bnd_slice", "Slice"),
+        ("bnd_tile", "Tile"),
+    ), render_boundary),
+}
 
-# Every overlay flag key (flat + partition master + layers). Partition is OFF
-# by default; when the user enables it, PU is pre-selected (CU is implied), so
-# part_pu starts checked even though the master starts unchecked.
+# Every overlay flag key (flat overlays + group masters + group sub-layers).
 ALL_OVERLAY_KEYS = (
-    tuple(OVERLAYS) + (PARTITION_KEY,) + tuple(k for k, _ in PARTITION_LAYERS)
+    tuple(OVERLAYS)
+    + tuple(OVERLAY_GROUPS)
+    + tuple(sk for _lbl, subs, _fn in OVERLAY_GROUPS.values() for sk, _sl in subs)
 )
-DEFAULT_ON = ("part_pu",)
+# Group masters start OFF; sub-layers start checked so enabling a group shows a
+# complete view. (Partition keeps just PU pre-checked, its established default.)
+DEFAULT_ON = (
+    "part_pu",
+    "mode_inter", "mode_intra_angular", "mode_intra_plane", "mode_intra_dc",
+    "bnd_slice", "bnd_tile",
+)
 
 
 def needed_layers(flags: dict) -> set:
@@ -367,10 +405,6 @@ def needed_layers(flags: dict) -> set:
     need: set = set()
     if flags.get("qp"):
         need.add("qp")
-    if flags.get("mv"):
-        need.add("mvs")
-    if flags.get("intra_angular") or flags.get("intra_plane") or flags.get("intra_dc"):
-        need.add("intra")
     if flags.get("types") or flags.get("blocksize"):
         need.add("blocks")
     if flags.get(PARTITION_KEY):
@@ -381,8 +415,15 @@ def needed_layers(flags: dict) -> set:
             need.add("tu_luma")
         if flags.get("part_tu_chroma"):
             need.add("tu_chroma")
-    if flags.get("slice"):
-        need.add("slice")
-    if flags.get("tile"):
-        need.add("tile")
+    if flags.get("mode"):
+        if flags.get("mode_inter"):
+            need.add("mvs")
+        if (flags.get("mode_intra_angular") or flags.get("mode_intra_plane")
+                or flags.get("mode_intra_dc")):
+            need.add("intra")
+    if flags.get("boundary"):
+        if flags.get("bnd_slice"):
+            need.add("slice")
+        if flags.get("bnd_tile"):
+            need.add("tile")
     return need
