@@ -147,6 +147,19 @@ class FrameAnalysis:
         )
         return m[mask]
 
+    def bits_at(self, px: int, py: int):
+        """Per-CU bit-cost record (BITSIZE_DTYPE) covering pixel (px, py), or
+        None (e.g. codecs without bit data)."""
+        if self.bit_sizes is None or len(self.bit_sizes) == 0 or px < 0 or py < 0:
+            return None
+        b = self.bit_sizes
+        mask = (
+            (b["x"] <= px) & (px < b["x"] + b["w"])
+            & (b["y"] <= py) & (py < b["y"] + b["h"])
+        )
+        hits = b[mask]
+        return hits[0] if len(hits) else None
+
     def block_at(self, px: int, py: int):
         """Coding block (BLOCK_DTYPE record) covering pixel (px, py), or None.
 

@@ -264,6 +264,7 @@ class BlockHoverPanel(QWidget):
         block = info.get("block")
         qp = info.get("qp")
         mvs = info.get("mvs")
+        bits = info.get("bits")
         unit = info["unit"]
 
         loc = self._section("Location")
@@ -281,6 +282,13 @@ class BlockHoverPanel(QWidget):
                 self._row(cu, "depth", str(int(block["depth"])))
         else:
             self._row(cu, "type", "n/a (no partition data)")
+
+        # Coded bit cost (Elecard-style): size (total) with prediction /
+        # transform breakdown. HEVC only; absent otherwise.
+        if bits is not None:
+            size = QTreeWidgetItem(cu, ["size", f"{int(bits['cu'])} bits"])
+            _kv_row(size, "prediction", str(int(bits["pu"])))
+            _kv_row(size, "transform", str(int(bits["tu"])))
 
         tu = self._section("Transform Unit")
         self._row(tu, qp_field_name(codec),
