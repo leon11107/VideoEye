@@ -12,14 +12,13 @@ from .overlay import (
     render_partition, render_mode, render_block_types,
 )
 
-# Partition + mode layers on -- used for the always-on hover inspection overlay,
-# so hovering reveals the region's CU/PU/TU, MVs and intra direction regardless
-# of which overlays are toggled.
+# Always-on hover inspection overlay: reveal the region's CU/PU/TU partition,
+# block type and MVs regardless of the overlay toggles. Intra-mode glyphs are
+# intentionally excluded -- hover shows partition / type / MV only.
 _HOVER_FLAGS = {
     "partition": True, "part_pu": True,
     "part_tu_luma": True, "part_tu_chroma": True,
-    "mode": True, "mode_inter": True, "mode_intra_angular": True,
-    "mode_intra_plane": True, "mode_intra_dc": True,
+    "mode": True, "mode_inter": True,
 }
 
 
