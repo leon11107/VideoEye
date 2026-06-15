@@ -426,6 +426,10 @@ class Demuxer:
         self._frames = []
         stream = self._video_stream
         time_base = float(stream.time_base) if stream.time_base else 1.0
+        # Stream fps, used as the bitrate fallback when packets carry no
+        # duration (e.g. some raw/elementary streams).
+        fps = (float(stream.average_rate) if stream.average_rate
+               else float(stream.base_rate) if stream.base_rate else 0.0)
         # Best-effort total for a determinate bar; 0 (unknown) for raw
         # streams where the container reports no frame count.
         total_est = stream.frames if stream.frames and stream.frames > 0 else 0
@@ -462,12 +466,15 @@ class Demuxer:
                 time_seconds=packet.pts * time_base if packet.pts is not None else 0.0
             )
 
+            if packet.duration and packet.duration > 0:
+                frame.instant_bitrate = int(
+                    (packet.size * 8) / (packet.duration * time_base))
+            elif fps > 0:
+                frame.instant_bitrate = int(packet.size * 8 * fps)
+
             self._frames.append(frame)
             total_bytes += packet.size
-
-            if packet.duration and packet.duration > 0:
-                instant_bitrate = int((packet.size * 8) / (packet.duration * time_base))
-                max_bitrate = max(max_bitrate, instant_bitrate)
+            max_bitrate = max(max_bitrate, frame.instant_bitrate)
 
             frame_index += 1
             if progress_cb is not None and (frame_index & 0x3F) == 0:

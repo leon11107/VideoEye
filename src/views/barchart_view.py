@@ -26,6 +26,8 @@ class BarChartWidget(QWidget):
         self._bar_width = 4
         self._bar_spacing = 1
         self._max_frame_size = 1
+        self._max_bitrate = 1  # peak instantaneous bitrate (bps), for the line
+        self._show_bitrate = True
         self._selected_index = -1
         self._hover_index = -1
         # Reference frames of the selected frame (decode-order indices), per
@@ -54,11 +56,22 @@ class BarChartWidget(QWidget):
 
         if frames:
             self._max_frame_size = max(f.size for f in frames)
+            self._max_bitrate = max((f.instant_bitrate for f in frames),
+                                    default=0) or 1
         else:
             self._max_frame_size = 1
+            self._max_bitrate = 1
 
         self._update_size()
         self.update()
+
+    @property
+    def max_frame_size(self) -> int:
+        return self._max_frame_size
+
+    @property
+    def max_bitrate(self) -> int:
+        return self._max_bitrate
 
     def set_bar_width(self, width: int) -> None:
         """Set bar width in pixels."""
@@ -138,6 +151,11 @@ class BarChartWidget(QWidget):
                 ])
                 painter.drawPolygon(triangle)
 
+        # Instantaneous-bitrate polyline overlaid on the size bars.
+        if self._show_bitrate:
+            self._draw_bitrate_line(painter, step, first, last, height,
+                                    available_height)
+
         # Reference-frame markers/arrows for the selected frame.
         self._draw_ref_markers(painter, step, first, last, height, available_height)
 
@@ -148,6 +166,30 @@ class BarChartWidget(QWidget):
         """Y of the top of frame i's bar (the marker anchors just above it)."""
         bh = max(2, int(self._frames[i].size / self._max_frame_size * available_height))
         return height - bh - 10
+
+    def _bitrate_y(self, i: int, height: int, available_height: int) -> int:
+        """Y of the bitrate point for frame i (shares the bars' plot area)."""
+        norm = self._frames[i].instant_bitrate / self._max_bitrate
+        norm = max(0.0, min(1.0, norm))
+        return height - 10 - int(norm * available_height)
+
+    def _draw_bitrate_line(self, painter: QPainter, step: int, first: int,
+                           last: int, height: int, available_height: int) -> None:
+        """Polyline of each frame's instantaneous bitrate (bps), normalized to
+        the stream peak. Drawn one segment past the dirty range each side so the
+        line stays continuous under clipped (per-bar) repaints."""
+        if self._max_bitrate <= 0 or len(self._frames) < 2:
+            return
+        painter.setPen(QPen(QColor(255, 200, 40), 1))  # amber, over the bars
+        i0 = max(0, first - 1)
+        i1 = min(len(self._frames) - 1, last + 1)
+        prev = None
+        for i in range(i0, i1 + 1):
+            x = 5 + i * step + self._bar_width // 2
+            y = self._bitrate_y(i, height, available_height)
+            if prev is not None:
+                painter.drawLine(prev[0], prev[1], x, y)
+            prev = (x, y)
 
     def _draw_ref_markers(self, painter: QPainter, step: int, first: int,
                           last: int, height: int, available_height: int) -> None:
@@ -217,6 +259,8 @@ class BarChartWidget(QWidget):
                 tooltip = (f"Frame {index}\n"
                           f"Type: {frame.frame_type.value}\n"
                           f"Size: {frame.size:,} bytes\n"
+                          f"Bitrate: {frame.instant_bitrate:,} bps"
+                          f" ({frame.instant_bitrate / 1e6:.2f} Mbps)\n"
                           f"Keyframe: {'Yes' if frame.is_keyframe else 'No'}")
                 self.setToolTip(tooltip)
             else:
@@ -272,12 +316,29 @@ class BarChartWidget(QWidget):
 
 
 class LegendWidget(QWidget):
-    """Fixed legend panel showing frame type colors."""
+    """Fixed legend panel: frame-type colors, the bitrate-line key, and the
+    stream's peak frame size (the bars' full-height reference)."""
+
+    BITRATE_COLOR = QColor(255, 200, 40)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(70)
+        self.setFixedWidth(92)
         self.setMinimumHeight(60)
+        self._max_frame_size = 0
+
+    def set_max_frame_size(self, size: int) -> None:
+        if size != self._max_frame_size:
+            self._max_frame_size = size
+            self.update()
+
+    @staticmethod
+    def _human_size(n: int) -> str:
+        if n >= 1 << 20:
+            return f"{n / (1 << 20):.2f} MB"
+        if n >= 1 << 10:
+            return f"{n / (1 << 10):.1f} KB"
+        return f"{n} B"
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -300,6 +361,20 @@ class LegendWidget(QWidget):
             painter.fillRect(6, y, 10, 10, color)
             painter.drawText(20, y + 9, label)
             y += 18
+
+        # Bitrate-line key.
+        painter.setPen(QPen(self.BITRATE_COLOR, 2))
+        painter.drawLine(6, y + 5, 16, y + 5)
+        painter.setPen(QColor(200, 200, 200))
+        painter.drawText(20, y + 9, "Bitrate")
+        y += 22
+
+        # Peak frame size (the full bar height corresponds to this).
+        if self._max_frame_size > 0:
+            painter.setPen(QColor(150, 150, 150))
+            painter.drawText(6, y + 9, "Max size")
+            painter.setPen(QColor(230, 230, 230))
+            painter.drawText(6, y + 24, self._human_size(self._max_frame_size))
 
 
 class BarChartView(QWidget):
@@ -337,6 +412,7 @@ class BarChartView(QWidget):
     def set_frames(self, frames: list[FrameInfo]) -> None:
         """Set frame data for visualization."""
         self._chart.set_frames(frames)
+        self._legend.set_max_frame_size(self._chart.max_frame_size if frames else 0)
 
     def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
         """Mark the selected frame's L0/L1 reference frames on the chart."""
@@ -376,6 +452,7 @@ class BarChartView(QWidget):
     def clear(self) -> None:
         """Clear the chart."""
         self._chart.set_frames([])
+        self._legend.set_max_frame_size(0)
 
     @property
     def selected_index(self) -> int:

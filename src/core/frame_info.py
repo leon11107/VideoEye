@@ -30,6 +30,11 @@ class FrameInfo:
     # Timing in seconds (calculated from pts and time_base)
     time_seconds: float = 0.0
 
+    # Instantaneous bitrate in bits/second: frame bits over the frame's
+    # display duration (falls back to frame bits x stream fps when the
+    # container reports no per-packet duration).
+    instant_bitrate: int = 0
+
     # NAL unit info (populated after parsing)
     nalu_count: int = 0
     is_multi_slice: bool = False
