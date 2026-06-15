@@ -1,10 +1,16 @@
-"""Hex dump viewer for raw packet/NAL unit data."""
+"""Hex dump viewer for raw packet/NAL unit data.
+
+The dump is split across two panes inside a draggable QSplitter: the left
+pane holds the address column and hex bytes, the right pane the matching
+ASCII text. The two scroll together (one row per line in both), so dragging
+the divider only trades horizontal width between hex and ASCII.
+"""
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QTextEdit, QLabel, QHBoxLayout, QSpinBox
+    QWidget, QVBoxLayout, QTextEdit, QLabel, QHBoxLayout, QSpinBox, QSplitter
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QTextCharFormat, QColor, QTextCursor
+from PyQt6.QtGui import QFont
 
 
 class HexViewer(QWidget):
@@ -28,6 +34,7 @@ class HexViewer(QWidget):
         # the bitstream rather than 0-based within this packet. Highlight and
         # scroll offsets stay relative to self._data.
         self._base_addr = 0
+        self._syncing = False  # guard against scroll-sync recursion
         self._setup_ui()
 
     def _setup_ui(self):
@@ -50,29 +57,53 @@ class HexViewer(QWidget):
 
         layout.addLayout(header)
 
-        # Hex display
-        self._text_edit = QTextEdit()
-        self._text_edit.setReadOnly(True)
-        self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-
-        # Use monospace font
+        # Shared monospace font so both panes have identical line heights
+        # (a prerequisite for pixel-accurate scroll syncing).
         font = QFont("Consolas", 10)
         if not font.exactMatch():
             font = QFont("Courier New", 10)
         if not font.exactMatch():
             font = QFont("monospace", 10)
-        self._text_edit.setFont(font)
 
-        # Dark theme styling
-        self._text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-            }
-        """)
+        style = (
+            "QTextEdit {"
+            "  background-color: #1e1e1e;"
+            "  color: #d4d4d4;"
+            "  border: 1px solid #3c3c3c;"
+            "}"
+        )
 
-        layout.addWidget(self._text_edit)
+        # Left pane: address column + hex bytes. Right pane: ASCII text.
+        self._hex_edit = QTextEdit()
+        self._ascii_edit = QTextEdit()
+        for edit in (self._hex_edit, self._ascii_edit):
+            edit.setReadOnly(True)
+            edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+            edit.setFont(font)
+            edit.setStyleSheet(style)
+
+        # The draggable divider trades width between hex and ASCII.
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.addWidget(self._hex_edit)
+        self._splitter.addWidget(self._ascii_edit)
+        self._splitter.setStretchFactor(0, 3)  # hex pane gets most width
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([600, 220])
+        layout.addWidget(self._splitter)
+
+        # Keep the two panes scrolled in lock-step.
+        self._hex_edit.verticalScrollBar().valueChanged.connect(
+            lambda v: self._mirror_scroll(self._ascii_edit, v))
+        self._ascii_edit.verticalScrollBar().valueChanged.connect(
+            lambda v: self._mirror_scroll(self._hex_edit, v))
+
+    def _mirror_scroll(self, target: QTextEdit, value: int) -> None:
+        """Apply one pane's vertical scroll position to the other."""
+        if self._syncing:
+            return
+        self._syncing = True
+        target.verticalScrollBar().setValue(value)
+        self._syncing = False
 
     def set_data(self, data: bytes, highlight_start: int = -1,
                  highlight_end: int = -1, base_addr: int = 0) -> None:
@@ -106,7 +137,8 @@ class HexViewer(QWidget):
     def _update_display(self) -> None:
         """Update the hex dump display."""
         if not self._data:
-            self._text_edit.clear()
+            self._hex_edit.clear()
+            self._ascii_edit.clear()
             self._info_label.setText("No data")
             return
 
@@ -122,8 +154,10 @@ class HexViewer(QWidget):
         else:
             self._info_label.setText(f"{addr}{total:,} bytes")
 
-        # Build hex dump text with HTML formatting, for the window only.
-        lines = []
+        # Build the hex pane (address + bytes) and ASCII pane line by line,
+        # for the current window only. The two lists stay row-aligned.
+        hex_lines = []
+        ascii_lines = []
         offset = win_start
 
         while offset < win_end:
@@ -137,7 +171,6 @@ class HexViewer(QWidget):
             hex_parts = []
             for i, byte in enumerate(chunk):
                 byte_offset = offset + i
-                # Check if this byte should be highlighted
                 if self._highlight_start <= byte_offset < self._highlight_end:
                     hex_parts.append(f'<span style="background-color: #264f78; color: #ffffff;">{byte:02X}</span>')
                 else:
@@ -152,13 +185,13 @@ class HexViewer(QWidget):
             for i in range(0, len(hex_parts), 8):
                 hex_groups.append(' '.join(hex_parts[i:i+8]))
             hex_str = '  '.join(hex_groups)
+            hex_lines.append(f'{offset_str}  {hex_str}')
 
             # ASCII column
             ascii_parts = []
             for i, byte in enumerate(chunk):
                 byte_offset = offset + i
                 char = chr(byte) if 32 <= byte < 127 else '.'
-                # Escape HTML characters
                 if char == '<':
                     char = '&lt;'
                 elif char == '>':
@@ -170,17 +203,15 @@ class HexViewer(QWidget):
                     ascii_parts.append(f'<span style="background-color: #264f78;">{char}</span>')
                 else:
                     ascii_parts.append(char)
-
-            ascii_str = ''.join(ascii_parts)
-
-            # Combine line
-            line = f'{offset_str}  {hex_str}  <span style="color: #ce9178;">|{ascii_str}|</span>'
-            lines.append(line)
+            ascii_lines.append(
+                f'<span style="color: #ce9178;">{"".join(ascii_parts)}</span>')
 
             offset += bpl
 
-        html = '<pre style="margin: 0;">' + '\n'.join(lines) + '</pre>'
-        self._text_edit.setHtml(html)
+        self._hex_edit.setHtml(
+            '<pre style="margin: 0;">' + '\n'.join(hex_lines) + '</pre>')
+        self._ascii_edit.setHtml(
+            '<pre style="margin: 0;">' + '\n'.join(ascii_lines) + '</pre>')
 
     def set_highlight(self, start: int, end: int) -> None:
         """Set highlight range."""
@@ -197,7 +228,7 @@ class HexViewer(QWidget):
         self._update_display()
 
     def scroll_to_offset(self, offset: int) -> None:
-        """Scroll to make the given offset visible."""
+        """Scroll to make the given offset visible (both panes)."""
         if not self._data or offset < 0:
             return
 
@@ -207,14 +238,15 @@ class HexViewer(QWidget):
             self._update_display()
 
         # Line within the current window; jump straight to that block (O(1))
-        # rather than stepping the cursor down line by line.
+        # rather than stepping the cursor down line by line. Scroll the hex
+        # pane; the scroll-sync mirrors it onto the ASCII pane.
         line = (offset - self._win_start) // self._bytes_per_line
-        block = self._text_edit.document().findBlockByLineNumber(line)
+        block = self._hex_edit.document().findBlockByLineNumber(line)
         if block.isValid():
-            cursor = self._text_edit.textCursor()
+            cursor = self._hex_edit.textCursor()
             cursor.setPosition(block.position())
-            self._text_edit.setTextCursor(cursor)
-            self._text_edit.ensureCursorVisible()
+            self._hex_edit.setTextCursor(cursor)
+            self._hex_edit.ensureCursorVisible()
 
     def clear(self) -> None:
         """Clear the display."""
@@ -222,5 +254,6 @@ class HexViewer(QWidget):
         self._highlight_start = -1
         self._highlight_end = -1
         self._win_start = 0
-        self._text_edit.clear()
+        self._hex_edit.clear()
+        self._ascii_edit.clear()
         self._info_label.setText("No data")
