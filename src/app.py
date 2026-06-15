@@ -18,9 +18,7 @@ from .views.barchart_view import BarChartView
 from .views.decoded_view import DecodedView
 from .views.stream_viewer import StreamViewer
 from .views.hex_viewer import HexViewer
-from .views.block_info_view import (
-    OverlayControls, FrameStatsPanel, BlockHoverPanel
-)
+from .views.block_info_view import OverlayPanel, FrameStatsPanel
 
 
 class MainWindow(QMainWindow):
@@ -80,18 +78,22 @@ class MainWindow(QMainWindow):
                      Qt.DockWidgetArea.TopDockWidgetArea |
                      Qt.DockWidgetArea.BottomDockWidgetArea)
 
-        # Left docks, presented as tabs: Stream Info / Overlays / Frame Stats /
-        # Block Info. Each is its own dock so the user can pull tabs apart, but
-        # they start tabbed together so the panel isn't crowded.
+        # Left docks, presented as tabs: Stream Info / Overlays / Frame Stats.
+        # The Overlays tab carries both the overlay toggles and the live
+        # cursor block-info table, so hovering the canvas updates the block
+        # details right next to the switches. Each is its own dock so the user
+        # can pull tabs apart, but they start tabbed so the panel isn't crowded.
         self._stream_view = StreamView()
         stream_dock = QDockWidget("Stream Info", self)
         stream_dock.setWidget(self._stream_view)
         stream_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stream_dock)
 
-        self._overlay_controls = OverlayControls()
+        self._overlay_panel = OverlayPanel()
+        self._overlay_controls = self._overlay_panel.controls
+        self._block_hover = self._overlay_panel.hover
         overlay_dock = QDockWidget("Overlays", self)
-        overlay_dock.setWidget(self._overlay_controls)
+        overlay_dock.setWidget(self._overlay_panel)
         overlay_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, overlay_dock)
 
@@ -101,16 +103,9 @@ class MainWindow(QMainWindow):
         stats_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stats_dock)
 
-        self._block_hover = BlockHoverPanel()
-        block_dock = QDockWidget("Block Info", self)
-        block_dock.setWidget(self._block_hover)
-        block_dock.setAllowedAreas(all_areas)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, block_dock)
-
         # Tab them together and show Stream Info first.
         self.tabifyDockWidget(stream_dock, overlay_dock)
         self.tabifyDockWidget(overlay_dock, stats_dock)
-        self.tabifyDockWidget(stats_dock, block_dock)
         stream_dock.raise_()
 
         # Bottom dock - Bar chart
@@ -150,7 +145,6 @@ class MainWindow(QMainWindow):
             'stream': stream_dock,
             'overlays': overlay_dock,
             'stats': stats_dock,
-            'blockinfo': block_dock,
             'barchart': barchart_dock,
             'viewer': viewer_dock,
             'hex': hex_dock

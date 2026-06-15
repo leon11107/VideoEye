@@ -1,16 +1,18 @@
-"""Block analysis panels, presented as separate tabs:
+"""Block analysis panels:
 
 - OverlayControls: overlay toggles (QP / MV / Partition CU·PU·TU / Types).
-- FrameStatsPanel: per-frame statistics.
 - BlockHoverPanel: Elecard-style name|value table for the block under cursor.
+- OverlayPanel: the two above stacked in one widget (the "Overlays" tab), so
+  hovering the canvas updates the block table beside the toggles.
+- FrameStatsPanel: per-frame statistics.
 """
 
 import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QToolButton,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
 from ..analysis import PredType, block_type_label, qp_field_name
@@ -30,6 +32,10 @@ class OverlayControls(QWidget):
         super().__init__(parent)
         self._checkboxes: dict[str, QCheckBox] = {}
         self._setup_ui()
+        # Stay compact: the toggles sit above the hover panel in the shared
+        # Overlays tab, so the controls should take only their natural height.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -73,7 +79,6 @@ class OverlayControls(QWidget):
         self._part_container.setEnabled(part_master.isChecked())
         part_master.toggled.connect(self._part_container.setEnabled)
         layout.addWidget(self._part_container)
-        layout.addStretch()
 
     def _on_partition_expand(self, expanded: bool):
         self._part_container.setVisible(expanded)
@@ -85,6 +90,48 @@ class OverlayControls(QWidget):
 
     def overlay_flags(self) -> dict:
         return {key: cb.isChecked() for key, cb in self._checkboxes.items()}
+
+
+class OverlayPanel(QWidget):
+    """Overlay toggles with the live block-info table beneath them.
+
+    Combining both in one tab lets the cursor's block details update in place
+    next to the overlay switches: enable an overlay, then hover the canvas and
+    the same panel shows that region's coding info. Forwards the controls'
+    signals/API so callers treat it like the old OverlayControls plus a hover
+    sink (set_hover / clear_hover)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.controls = OverlayControls()
+        self.overlays_changed = self.controls.overlays_changed
+        self.overlay_flags = self.controls.overlay_flags
+        layout.addWidget(self.controls)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(divider)
+
+        heading = QLabel("Block Info (cursor)")
+        heading.setContentsMargins(8, 4, 8, 2)
+        font = heading.font()
+        font.setBold(True)
+        heading.setFont(font)
+        layout.addWidget(heading)
+
+        self.hover = BlockHoverPanel()
+        layout.addWidget(self.hover, 1)  # the table takes the remaining height
+
+    def set_hover(self, info) -> None:
+        self.hover.set_hover(info)
+
+    def clear_hover(self) -> None:
+        self.hover.clear()
 
 
 class FrameStatsPanel(QWidget):
