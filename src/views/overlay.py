@@ -9,7 +9,9 @@ import math
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRect, Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen
+from PyQt6.QtGui import (
+    QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF,
+)
 
 from ..analysis import FrameAnalysis, PredType
 from ..analysis.schema import INTRA_DC, INTRA_PLANE, INTRA_ANGULAR
@@ -268,9 +270,17 @@ def _intra_dir_table(codec: str) -> np.ndarray:
     return np.zeros((1, 2), dtype=np.float32)
 
 
+# Each intra category uses a distinct *shape* (not just colour) so it never
+# reads like an MV marker: angular = arrow in the prediction direction,
+# DC = filled square (flat/constant block), planar = filled diamond (gradient).
+def _intra_glyph_half(sel) -> np.ndarray:
+    """Half-extent (px) of the centre glyph, scaled to block size, clamped."""
+    return np.clip((np.minimum(sel["w"], sel["h"]) * 0.2).astype(np.int32), 2, 7)
+
+
 def render_intra_angular(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Angular intra blocks: a line through the block centre along the
-    prediction direction, with a dot at the centre."""
+    """Angular intra blocks: an arrow from the block centre along the prediction
+    direction (a small arrowhead distinguishes it from a plain MV line)."""
     intra = analysis.intra
     if intra is None or len(intra) == 0:
         return
@@ -278,52 +288,71 @@ def render_intra_angular(painter: QPainter, analysis: FrameAnalysis) -> None:
     if len(sel) == 0:
         return
     dirs = _intra_dir_table(analysis.codec)
-    modes = np.clip(sel["mode"], 0, len(dirs) - 1)
-    d = dirs[modes]
+    d = dirs[np.clip(sel["mode"], 0, len(dirs) - 1)]
     cx = sel["x"] + sel["w"] / 2.0
     cy = sel["y"] + sel["h"] / 2.0
     ln = np.minimum(sel["w"], sel["h"]) * 0.45
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setPen(QPen(_INTRA_ANGULAR_COLOR, 1.0))
-    painter.drawLines([QLineF(float(a), float(b), float(a + dx * L),
-                              float(b + dy * L))
-                       for a, b, dx, dy, L in
-                       zip(cx, cy, d[:, 0], d[:, 1], ln)])
-    pen = QPen(_INTRA_ANGULAR_COLOR, 2.5)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.drawPoints([QPointF(float(a), float(b)) for a, b in zip(cx, cy)])
-
-
-def _intra_dots(painter, sel, color, cap) -> None:
-    if len(sel) == 0:
-        return
-    cx = sel["x"] + sel["w"] / 2.0
-    cy = sel["y"] + sel["h"] / 2.0
-    pen = QPen(color, 5.0)
-    pen.setCapStyle(cap)
-    painter.setPen(pen)
-    painter.drawPoints([QPointF(float(a), float(b)) for a, b in zip(cx, cy)])
+    painter.setPen(QPen(_INTRA_ANGULAR_COLOR, 1.2))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    lines = []
+    ex = cx + d[:, 0] * ln
+    ey = cy + d[:, 1] * ln
+    ah = np.clip(ln * 0.4, 2.0, 6.0)         # arrowhead size
+    for a, b, x2, y2, dx, dy, h in zip(cx, cy, ex, ey, d[:, 0], d[:, 1], ah):
+        lines.append(QLineF(float(a), float(b), float(x2), float(y2)))
+        # two short barbs at the tip, ~+/-30 deg from the shaft
+        px, py = -dy, dx
+        lines.append(QLineF(float(x2), float(y2),
+                            float(x2 - dx * h + px * h * 0.5),
+                            float(y2 - dy * h + py * h * 0.5)))
+        lines.append(QLineF(float(x2), float(y2),
+                            float(x2 - dx * h - px * h * 0.5),
+                            float(y2 - dy * h - py * h * 0.5)))
+    painter.drawLines(lines)
 
 
 def render_intra_dc(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """DC intra blocks: a round dot at the block centre (no direction)."""
+    """DC intra blocks: a filled square at the block centre (flat prediction)."""
     intra = analysis.intra
     if intra is None or len(intra) == 0:
         return
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    _intra_dots(painter, intra[intra["cat"] == INTRA_DC],
-                _INTRA_DC_COLOR, Qt.PenCapStyle.RoundCap)
+    sel = intra[intra["cat"] == INTRA_DC]
+    if len(sel) == 0:
+        return
+    half = _intra_glyph_half(sel)
+    cx = sel["x"] + sel["w"] // 2
+    cy = sel["y"] + sel["h"] // 2
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(_INTRA_DC_COLOR)
+    painter.drawRects([QRect(int(x - h), int(y - h), int(2 * h), int(2 * h))
+                       for x, y, h in zip(cx, cy, half)])
+    painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
 def render_intra_plane(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Planar (and AV1 smooth/paeth) intra blocks: a square dot at the centre."""
+    """Planar (and AV1 smooth/paeth) intra blocks: a filled diamond."""
     intra = analysis.intra
     if intra is None or len(intra) == 0:
         return
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-    _intra_dots(painter, intra[intra["cat"] == INTRA_PLANE],
-                _INTRA_PLANE_COLOR, Qt.PenCapStyle.SquareCap)
+    sel = intra[intra["cat"] == INTRA_PLANE]
+    if len(sel) == 0:
+        return
+    half = _intra_glyph_half(sel)
+    cx = sel["x"] + sel["w"] / 2.0
+    cy = sel["y"] + sel["h"] / 2.0
+    path = QPainterPath()
+    for x, y, h in zip(cx, cy, half):
+        path.addPolygon(QPolygonF([
+            QPointF(x, y - h), QPointF(x + h, y),
+            QPointF(x, y + h), QPointF(x - h, y),
+        ]))
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(_INTRA_PLANE_COLOR)
+    painter.drawPath(path)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
 def render_mode(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
