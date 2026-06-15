@@ -43,10 +43,16 @@ class StreamViewer(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.itemClicked.connect(self._on_item_clicked)
 
-        # Auto-resize columns to fit content
+        # Both columns are user-resizable: drag the divider to trade width
+        # between Element and Value (a horizontal scrollbar appears when the
+        # columns exceed the panel). Start with practical defaults.
         header = self._tree.header()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionsMovable(False)
+        self._tree.setColumnWidth(0, 220)
+        self._tree.setColumnWidth(1, 360)
 
         # Style
         self._tree.setStyleSheet("""
