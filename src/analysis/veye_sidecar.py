@@ -753,52 +753,68 @@ def _mvs_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     when the whole CU shares one MvField (the 2Nx2N case); CUs whose sub-cells
     differ (2NxN/Nx2N/NxN partitions) emit one vector per min-CB so the split
     is preserved. Vectors are converted from quarter-pel to luma pixels.
+
+    Fully vectorized: at 1440p the per-cell Python loop cost ~90 ms/frame, which
+    stuttered playback with the MV overlay on.
     """
     if fb.codec_id != _CODEC_HEVC or fb.pred_flag is None or fb.mv is None:
         return np.empty(0, dtype=MV_DTYPE)
 
     unit = fb.block_unit
-    cu_log2 = fb.cu_log2
-    pf = fb.pred_flag
-    mv = fb.mv
-    out: list[tuple] = []
+    gh, gw = fb.pred_flag.shape
+    pf = fb.pred_flag.astype(np.int32)
+    mv = fb.mv                                   # (gh, gw, 2, 2) int16
+    cu_log2 = fb.cu_log2.astype(np.int32)
 
-    def emit(px, py, size, flag, m):
-        if flag & 1:
-            out.append((px, py, size, size, 0,
-                        m[0, 0] / _HEVC_MV_SCALE, m[0, 1] / _HEVC_MV_SCALE))
-        if flag & 2:
-            out.append((px, py, size, size, 1,
-                        m[1, 0] / _HEVC_MV_SCALE, m[1, 1] / _HEVC_MV_SCALE))
+    mx = np.arange(gw, dtype=np.int32)[None, :].repeat(gh, axis=0)
+    my = np.arange(gh, dtype=np.int32)[:, None].repeat(gw, axis=1)
+    span = np.maximum(1, (1 << cu_log2) // unit)  # min-CB cells per CU side
+    ox = mx - (mx % span)                          # CU-origin cell coords
+    oy = my - (my % span)
+    is_origin = (mx == ox) & (my == oy)
 
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            cl = int(cu_log2[my, mx])
-            cu_px = 1 << cl
-            px = mx * unit
-            if px % cu_px or py % cu_px:
-                continue  # not the CU's top-left cell
-            span = cu_px // unit
-            y1 = min(my + span, fb.grid_h)
-            x1 = min(mx + span, fb.grid_w)
-            sub_pf = pf[my:y1, mx:x1]
-            if not sub_pf.any():
-                continue  # intra CU, no motion
-            sub_mv = mv[my:y1, mx:x1]
-            uniform = (bool((sub_pf == sub_pf.flat[0]).all())
-                       and bool((sub_mv == sub_mv[0, 0]).all()))
-            if uniform:
-                emit(px, py, cu_px, int(sub_pf.flat[0]), sub_mv[0, 0])
-            else:
-                for dy in range(y1 - my):
-                    for dx in range(x1 - mx):
-                        f = int(sub_pf[dy, dx])
-                        if f:
-                            emit(px + dx * unit, py + dy * unit, unit,
-                                 f, sub_mv[dy, dx])
+    # A CU is uniform iff every one of its cells equals the CU's origin cell
+    # (same pred_flag and same MVs). Count per-CU mismatches with a scatter-add.
+    match = (pf == pf[oy, ox]) & (mv == mv[oy, ox]).all(axis=(2, 3))
+    oidx = (oy * gw + ox).ravel()
+    nmis = np.zeros(gh * gw, dtype=np.int64)
+    np.add.at(nmis, oidx, (~match).ravel().astype(np.int64))
+    cu_uniform = (nmis[oy * gw + ox] == 0)
 
-    return _pack(out, MV_DTYPE)
+    motion = pf > 0
+    # Uniform CUs emit one vector at the origin (size = CU size); split CUs emit
+    # one per motion min-CB (size = min-CB).
+    cu_px = (1 << cu_log2).astype(np.int32)
+    sel_uniform = is_origin & cu_uniform & motion
+    sel_split = (~cu_uniform) & motion
+
+    def records(sel, size):
+        parts = []
+        ys, xs = np.nonzero(sel)
+        if len(xs) == 0:
+            return parts
+        flag = pf[ys, xs]
+        for lst, bit in ((0, 1), (1, 2)):
+            m = (flag & bit) != 0
+            if not m.any():
+                continue
+            yy, xx = ys[m], xs[m]
+            rec = np.empty(len(xx), dtype=MV_DTYPE)
+            rec["x"] = xx * unit
+            rec["y"] = yy * unit
+            sz = size[yy, xx] if isinstance(size, np.ndarray) else size
+            rec["w"] = sz
+            rec["h"] = sz
+            rec["list"] = lst
+            rec["mv_x"] = mv[yy, xx, lst, 0] / _HEVC_MV_SCALE
+            rec["mv_y"] = mv[yy, xx, lst, 1] / _HEVC_MV_SCALE
+            parts.append(rec)
+        return parts
+
+    parts = records(sel_uniform, cu_px) + records(sel_split, unit)
+    if not parts:
+        return np.empty(0, dtype=MV_DTYPE)
+    return np.concatenate(parts)
 
 
 def _partition(t: int, bx: int, by: int, u: int):
