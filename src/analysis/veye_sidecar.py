@@ -71,6 +71,14 @@ _AV1_BSIZE_WH = (
     (128, 128), (4, 16), (16, 4), (8, 32), (32, 8), (16, 64), (64, 16),
 )
 
+# libaom TX_SIZE enum -> (luma width, height) px, indexed 0..TX_SIZES_ALL-1.
+_AV1_TXSIZE_WH = (
+    (4, 4), (8, 8), (16, 16), (32, 32), (64, 64),
+    (4, 8), (8, 4), (8, 16), (16, 8), (16, 32), (32, 16),
+    (32, 64), (64, 32), (4, 16), (16, 4), (8, 32), (32, 8),
+    (16, 64), (64, 16),
+)
+
 # FFmpeg MB_TYPE_* bits (libavcodec/mpegutils.h) — ABI-stable.
 MB_TYPE_INTRA4x4 = 1 << 0
 MB_TYPE_INTRA16x16 = 1 << 1
@@ -420,6 +428,7 @@ def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
     bsize = fb.bsize
     pred = fb.pred
     mode = fb.mode
+    ref = fb.ref_idx
     out: list[tuple] = []
     for my in range(fb.grid_h):
         py = my * unit
@@ -431,7 +440,14 @@ def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
             px = mx * unit
             if px % bw or py % bh:
                 continue  # not the top-left cell of this block
-            out.append((px, py, bw, bh, 0, int(pred[my, mx]), int(mode[my, mx])))
+            p = int(pred[my, mx])
+            # Compound prediction (a second reference) maps to BI, matching the
+            # H.264/HEVC block-type coloring. AV1's skip_txfm flag is a residual
+            # property (not a prediction mode like H.264/HEVC P_Skip), so it is
+            # deliberately NOT folded into the prediction class here.
+            if p == PredType.INTER and ref is not None and int(ref[my, mx, 1]) >= 1:
+                p = PredType.BI
+            out.append((px, py, bw, bh, 0, p, int(mode[my, mx])))
     return _pack(out, BLOCK_DTYPE)
 
 
@@ -471,7 +487,11 @@ def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
 
     HEVC: each CU is split into PUs per its PartMode (2Nx2N's single PU
     coincides with the CU). H.264: the macroblock's partition rectangles.
+    AV1: the coding block is itself the prediction unit, so the PU rectangles
+    coincide with the coding blocks.
     """
+    if fb.codec_id == _CODEC_AV1:
+        return _blocks_from_av1(fb)
     if fb.codec_id != _CODEC_HEVC:
         return _h264_pus(fb)
     if fb.cu_log2 is None or fb.part_mode is None:
@@ -533,13 +553,47 @@ def _tu_rects(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
     return _pack(out, BLOCK_DTYPE)
 
 
+def _av1_tus(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
+    """AV1 transform units (BLOCK_DTYPE rectangles) from the per-MI tx_size.
+
+    tx_size is the coding block's transform size replicated across its 4x4 MI
+    cells; tiling each block by that size at aligned top-left cells gives the
+    TU rectangles. This is the block-level transform size (var-tx sub-splits
+    are not separately inspected), so it is an approximation. For chroma under
+    4:2:0 there is no sub-8 transform, so dimensions are clamped to >= 8.
+    """
+    if fb.codec_id != _CODEC_AV1 or fb.tx_size is None:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    tx = fb.tx_size
+    unit = fb.block_unit
+    out: list[tuple] = []
+    for my in range(fb.grid_h):
+        py = my * unit
+        for mx in range(fb.grid_w):
+            t = int(tx[my, mx])
+            if t < 0 or t >= len(_AV1_TXSIZE_WH):
+                continue
+            tw, th = _AV1_TXSIZE_WH[t]
+            if chroma:
+                tw, th = max(8, tw), max(8, th)
+            px = mx * unit
+            if px % tw or py % th:
+                continue  # not the TU's top-left cell
+            out.append((px, py, tw, th, 0, 0, t))
+    return _pack(out, BLOCK_DTYPE)
+
+
 def tu_luma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Luma transform-unit rectangles."""
+    if fb.codec_id == _CODEC_AV1:
+        return _av1_tus(fb, chroma=False)
     return _tu_rects(fb, chroma=False)
 
 
 def tu_chroma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Chroma transform-unit rectangles (4:2:0 derivation)."""
+    if fb.codec_id == _CODEC_AV1:
+        return _av1_tus(fb, chroma=True)
     return _tu_rects(fb, chroma=True)
 
 
