@@ -84,6 +84,12 @@ _AV1_TXSIZE_WH = (
     (16, 64), (64, 16),
 )
 
+# numpy lookup tables (width/height per enum) for vectorized AV1 builders.
+_AV1_BSIZE_W = np.array([w for w, h in _AV1_BSIZE_WH], dtype=np.int32)
+_AV1_BSIZE_H = np.array([h for w, h in _AV1_BSIZE_WH], dtype=np.int32)
+_AV1_TXSIZE_W = np.array([w for w, h in _AV1_TXSIZE_WH], dtype=np.int32)
+_AV1_TXSIZE_H = np.array([h for w, h in _AV1_TXSIZE_WH], dtype=np.int32)
+
 # FFmpeg MB_TYPE_* bits (libavcodec/mpegutils.h) — ABI-stable.
 MB_TYPE_INTRA4x4 = 1 << 0
 MB_TYPE_INTRA16x16 = 1 << 1
@@ -420,6 +426,19 @@ def _mb_pred(t: int) -> int:
     return PredType.INTER
 
 
+def _mb_pred_grid(mb: np.ndarray) -> np.ndarray:
+    """Vectorized _mb_pred over an mb_type grid -> PredType grid (uint8).
+    Applied lowest-to-highest precedence so the result matches _mb_pred's
+    first-match-wins order (IPCM > INTRA > SKIP > BI > INTER)."""
+    t = mb.astype(np.uint32)
+    p = np.full(t.shape, PredType.INTER, dtype=np.uint8)
+    p[((t & _MB_TYPE_L0) != 0) & ((t & _MB_TYPE_L1) != 0)] = PredType.BI
+    p[(t & MB_TYPE_SKIP) != 0] = PredType.SKIP
+    p[(t & _MB_TYPE_INTRA) != 0] = PredType.INTRA
+    p[(t & MB_TYPE_INTRA_PCM) != 0] = PredType.IPCM
+    return p
+
+
 def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Coding units (BLOCK_DTYPE). For H.264 the CU is the 16x16 macroblock;
     its prediction-partition split is the PU (see pus_from_frame)."""
@@ -429,14 +448,18 @@ def blocks_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
         return _blocks_from_av1(fb)
 
     unit = fb.block_unit
-    out: list[tuple] = []
-    mb = fb.mb_type
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            t = int(mb[my, mx])
-            out.append((mx * unit, py, unit, unit, 0, _mb_pred(t), 0))
-    return _pack(out, BLOCK_DTYPE)
+    gh, gw = fb.mb_type.shape
+    mx = np.arange(gw, dtype=np.int32)[None, :].repeat(gh, axis=0)
+    my = np.arange(gh, dtype=np.int32)[:, None].repeat(gw, axis=1)
+    out = np.empty(gh * gw, dtype=BLOCK_DTYPE)
+    out["x"] = (mx * unit).ravel()
+    out["y"] = (my * unit).ravel()
+    out["w"] = unit
+    out["h"] = unit
+    out["depth"] = 0
+    out["pred"] = _mb_pred_grid(fb.mb_type).ravel()
+    out["mode"] = 0
+    return out
 
 
 def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -492,30 +515,35 @@ def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
     field stores the libaom PREDICTION_MODE for labeling.
     """
     unit = fb.block_unit
-    bsize = fb.bsize
-    pred = fb.pred
-    mode = fb.mode
-    ref = fb.ref_idx
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            bs = int(bsize[my, mx])
-            if bs < 0 or bs >= len(_AV1_BSIZE_WH):
-                continue
-            bw, bh = _AV1_BSIZE_WH[bs]
-            px = mx * unit
-            if px % bw or py % bh:
-                continue  # not the top-left cell of this block
-            p = int(pred[my, mx])
-            # Compound prediction (a second reference) maps to BI, matching the
-            # H.264/HEVC block-type coloring. AV1's skip_txfm flag is a residual
-            # property (not a prediction mode like H.264/HEVC P_Skip), so it is
-            # deliberately NOT folded into the prediction class here.
-            if p == PredType.INTER and ref is not None and int(ref[my, mx, 1]) >= 1:
-                p = PredType.BI
-            out.append((px, py, bw, bh, 0, p, int(mode[my, mx])))
-    return _pack(out, BLOCK_DTYPE)
+    gh, gw = fb.bsize.shape
+    bs = fb.bsize.astype(np.int32)
+    valid = (bs >= 0) & (bs < len(_AV1_BSIZE_WH))
+    bsc = np.where(valid, bs, 0)
+    bw = _AV1_BSIZE_W[bsc]
+    bh = _AV1_BSIZE_H[bsc]
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = valid & (((mx * unit) % bw) == 0) & (((my * unit) % bh) == 0)
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+
+    p = fb.pred[ys, xs].astype(np.int32)
+    # Compound prediction (a second reference) maps to BI, matching the
+    # H.264/HEVC block-type coloring. AV1's skip_txfm flag is a residual
+    # property (not a prediction mode), so it is deliberately NOT folded in.
+    if fb.ref_idx is not None:
+        p[(p == PredType.INTER) & (fb.ref_idx[ys, xs, 1] >= 1)] = PredType.BI
+
+    out = np.empty(len(xs), dtype=BLOCK_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = bw[ys, xs]
+    out["h"] = bh[ys, xs]
+    out["depth"] = 0
+    out["pred"] = p
+    out["mode"] = fb.mode[ys, xs]
+    return out
 
 
 # HEVC PartMode -> PU rectangles as (fx, fy, fw, fh) fractions of the CU.
@@ -534,19 +562,63 @@ _PART_PUS = {
 
 def _h264_pus(fb: VeyeFrameBlocks) -> np.ndarray:
     """H.264 prediction units: the macroblock partition rectangles
-    (16x16 / 16x8 / 8x16 / 8x8 and intra/PCM), decoded from mb_type."""
+    (16x16 / 16x8 / 8x16 / 8x8 and intra/PCM), decoded from mb_type.
+
+    Vectorized: macroblocks are grouped by partition shape and each group's
+    sub-rectangles are emitted at once (mirrors the per-MB _partition logic)."""
     if fb.mb_type is None:
         return np.empty(0, dtype=BLOCK_DTYPE)
     unit = fb.block_unit
-    mb = fb.mb_type
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        for mx in range(fb.grid_w):
-            t = int(mb[my, mx])
-            bx, by = mx * unit, my * unit
-            for x, y, w, h, shape, pred in _partition(t, bx, by, unit):
-                out.append((x, y, w, h, 0, pred, shape))
-    return _pack(out, BLOCK_DTYPE)
+    t = fb.mb_type.astype(np.uint32)
+    skip = (t & MB_TYPE_SKIP) != 0
+    pred_inter = np.where(skip, PredType.SKIP, PredType.INTER).astype(np.uint8)
+
+    pcm = (t & MB_TYPE_INTRA_PCM) != 0
+    intra = ((t & _MB_TYPE_INTRA) != 0) & ~pcm
+    inter = ~pcm & ~intra
+    m16x8 = inter & ((t & MB_TYPE_16x8) != 0)
+    m8x16 = inter & ((t & MB_TYPE_8x16) != 0) & ~m16x8
+    m8x8 = inter & ((t & MB_TYPE_8x8) != 0) & ~m16x8 & ~m8x16
+    m16x16 = inter & ~m16x8 & ~m8x16 & ~m8x8
+
+    shape_intra = np.where((t & MB_TYPE_INTRA4x4) != 0,
+                           SHAPE_INTRA4, SHAPE_INTRA16).astype(np.int16)
+    shape_16 = np.where(skip, SHAPE_SKIP,
+                        np.where((t & MB_TYPE_DIRECT2) != 0,
+                                 SHAPE_DIRECT, SHAPE_16x16)).astype(np.int16)
+
+    parts: list[np.ndarray] = []
+
+    def emit(mask, fracs, shape, pred):
+        ys, xs = np.nonzero(mask)
+        if len(xs) == 0:
+            return
+        for fx, fy, fw, fh in fracs:
+            rec = np.empty(len(xs), dtype=BLOCK_DTYPE)
+            rec["x"] = xs * unit + int(fx * unit)
+            rec["y"] = ys * unit + int(fy * unit)
+            rec["w"] = int(fw * unit)
+            rec["h"] = int(fh * unit)
+            rec["depth"] = 0
+            rec["pred"] = pred[ys, xs] if isinstance(pred, np.ndarray) else pred
+            rec["mode"] = shape[ys, xs] if isinstance(shape, np.ndarray) else shape
+            parts.append(rec)
+
+    full = ((0.0, 0.0, 1.0, 1.0),)
+    emit(pcm, full, SHAPE_IPCM, PredType.IPCM)
+    emit(intra, full, shape_intra, PredType.INTRA)
+    emit(m16x8, ((0.0, 0.0, 1.0, 0.5), (0.0, 0.5, 1.0, 0.5)),
+         SHAPE_16x8, pred_inter)
+    emit(m8x16, ((0.0, 0.0, 0.5, 1.0), (0.5, 0.0, 0.5, 1.0)),
+         SHAPE_8x16, pred_inter)
+    emit(m8x8, ((0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 0.5, 0.5),
+                (0.0, 0.5, 0.5, 0.5), (0.5, 0.5, 0.5, 0.5)),
+         SHAPE_8x8, pred_inter)
+    emit(m16x16, full, shape_16, pred_inter)
+
+    if not parts:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    return np.concatenate(parts)
 
 
 def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -615,30 +687,42 @@ def _tu_rects(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
     if (fb.codec_id != _CODEC_HEVC or fb.tu_log2 is None
             or fb.cu_log2 is None):
         return np.empty(0, dtype=BLOCK_DTYPE)
-    tu = fb.tu_log2
     cu = fb.cu_log2
     unit = fb.tu_unit or fb.block_unit
-    th, tw = tu.shape
+    th, tw = fb.tu_log2.shape
     ratio = max(1, fb.block_unit // unit)
     cu_h, cu_w = cu.shape
-    out: list[tuple] = []
-    for my in range(th):
-        py = my * unit
-        for mx in range(tw):
-            l = int(tu[my, mx])
-            if l == 0:  # no explicit TU -> use the containing CU
-                cy, cx = my // ratio, mx // ratio
-                l = int(cu[cy, cx]) if cy < cu_h and cx < cu_w else 0
-            if l == 0:
-                continue
-            if chroma and l < 3:
-                l = 3  # 4:2:0: four 4x4 luma TUs share one 8x8 chroma TU
-            size = 1 << l
-            px = mx * unit
-            if px % size or py % size:
-                continue  # not the TU's top-left cell
-            out.append((px, py, size, size, 0, 0, l))
-    return _pack(out, BLOCK_DTYPE)
+
+    l = fb.tu_log2.astype(np.int32).copy()
+    # Cells with no explicit TU fall back to the containing CU's size (upsample
+    # the min-CB grid to the min-TB grid); out-of-range maps to 0 (skipped).
+    cy = np.arange(th, dtype=np.int32) // ratio
+    cx = np.arange(tw, dtype=np.int32) // ratio
+    cu_up = cu[np.minimum(cy, cu_h - 1)][:, np.minimum(cx, cu_w - 1)].astype(np.int32)
+    oob = (cy >= cu_h)[:, None] | (cx >= cu_w)[None, :]
+    cu_up[oob] = 0
+    l = np.where(l == 0, cu_up, l)
+    if chroma:
+        l = np.where((l > 0) & (l < 3), 3, l)   # 4:2:0: no sub-8 chroma TU
+
+    valid = l > 0
+    size = (1 << np.where(valid, l, 0)).astype(np.int32)
+    mx = np.arange(tw, dtype=np.int32)[None, :]
+    my = np.arange(th, dtype=np.int32)[:, None]
+    origin = valid & (((mx * unit) % size) == 0) & (((my * unit) % size) == 0)
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+
+    out = np.empty(len(xs), dtype=BLOCK_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = size[ys, xs]
+    out["h"] = size[ys, xs]
+    out["depth"] = 0
+    out["pred"] = 0
+    out["mode"] = l[ys, xs]
+    return out
 
 
 def _av1_tus(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
@@ -652,23 +736,32 @@ def _av1_tus(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
     """
     if fb.codec_id != _CODEC_AV1 or fb.tx_size is None:
         return np.empty(0, dtype=BLOCK_DTYPE)
-    tx = fb.tx_size
     unit = fb.block_unit
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            t = int(tx[my, mx])
-            if t < 0 or t >= len(_AV1_TXSIZE_WH):
-                continue
-            tw, th = _AV1_TXSIZE_WH[t]
-            if chroma:
-                tw, th = max(8, tw), max(8, th)
-            px = mx * unit
-            if px % tw or py % th:
-                continue  # not the TU's top-left cell
-            out.append((px, py, tw, th, 0, 0, t))
-    return _pack(out, BLOCK_DTYPE)
+    gh, gw = fb.tx_size.shape
+    tx = fb.tx_size.astype(np.int32)
+    valid = (tx >= 0) & (tx < len(_AV1_TXSIZE_WH))
+    txc = np.where(valid, tx, 0)
+    tw = _AV1_TXSIZE_W[txc].copy()
+    th = _AV1_TXSIZE_H[txc].copy()
+    if chroma:
+        tw = np.maximum(8, tw)
+        th = np.maximum(8, th)
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = valid & (((mx * unit) % tw) == 0) & (((my * unit) % th) == 0)
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+
+    out = np.empty(len(xs), dtype=BLOCK_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = tw[ys, xs]
+    out["h"] = th[ys, xs]
+    out["depth"] = 0
+    out["pred"] = 0
+    out["mode"] = tx[ys, xs]
+    return out
 
 
 def tu_luma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -754,29 +847,36 @@ def _mvs_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
     if fb.bsize is None or fb.mv is None or fb.ref_idx is None:
         return np.empty(0, dtype=MV_DTYPE)
     unit = fb.block_unit
-    bsize = fb.bsize
+    gh, gw = fb.bsize.shape
+    bs = fb.bsize.astype(np.int32)
+    valid = (bs >= 0) & (bs < len(_AV1_BSIZE_WH))
+    bsc = np.where(valid, bs, 0)
+    bw = _AV1_BSIZE_W[bsc]
+    bh = _AV1_BSIZE_H[bsc]
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = valid & (((mx * unit) % bw) == 0) & (((my * unit) % bh) == 0)
     ref = fb.ref_idx
     mv = fb.mv
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            bs = int(bsize[my, mx])
-            if bs < 0 or bs >= len(_AV1_BSIZE_WH):
-                continue
-            bw, bh = _AV1_BSIZE_WH[bs]
-            px = mx * unit
-            if px % bw or py % bh:
-                continue  # not the block's top-left cell
-            if int(ref[my, mx, 0]) >= 1:  # 0 = INTRA_FRAME
-                out.append((px, py, bw, bh, 0,
-                            mv[my, mx, 0, 0] / _AV1_MV_SCALE,
-                            mv[my, mx, 0, 1] / _AV1_MV_SCALE))
-            if int(ref[my, mx, 1]) >= 1:  # compound L1
-                out.append((px, py, bw, bh, 1,
-                            mv[my, mx, 1, 0] / _AV1_MV_SCALE,
-                            mv[my, mx, 1, 1] / _AV1_MV_SCALE))
-    return _pack(out, MV_DTYPE)
+
+    parts = []
+    for lst in (0, 1):                       # L0 always; L1 only when compound
+        sel = origin & (ref[..., lst] >= 1)  # ref_frame 0 == INTRA, skip
+        ys, xs = np.nonzero(sel)
+        if len(xs) == 0:
+            continue
+        rec = np.empty(len(xs), dtype=MV_DTYPE)
+        rec["x"] = xs * unit
+        rec["y"] = ys * unit
+        rec["w"] = bw[ys, xs]
+        rec["h"] = bh[ys, xs]
+        rec["list"] = lst
+        rec["mv_x"] = mv[ys, xs, lst, 0] / _AV1_MV_SCALE
+        rec["mv_y"] = mv[ys, xs, lst, 1] / _AV1_MV_SCALE
+        parts.append(rec)
+    if not parts:
+        return np.empty(0, dtype=MV_DTYPE)
+    return np.concatenate(parts)
 
 
 def _mvs_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:

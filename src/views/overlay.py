@@ -93,6 +93,7 @@ def _draw_rects(painter: QPainter, rects, color: QColor) -> None:
         return
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(QPen(color, 1.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)  # outline only, never fill
     painter.drawRects([QRect(int(x), int(y), int(w), int(h))
                        for x, y, w, h in zip(rects["x"], rects["y"],
                                              rects["w"], rects["h"])])
@@ -158,6 +159,18 @@ def _size_color(sz: int) -> QColor:
     return _SIZE_COLORS[nearest]
 
 
+def _fill_rects(painter: QPainter, sel, color: QColor) -> None:
+    """Fill a BLOCK_DTYPE selection in one batched call. drawRects() with a
+    brush and no pen fills each rect -- far cheaper than a fillRect() per rect
+    at high resolution."""
+    if len(sel) == 0:
+        return
+    painter.setBrush(color)
+    painter.drawRects([QRect(int(x), int(y), int(w), int(h))
+                       for x, y, w, h in zip(sel["x"], sel["y"],
+                                             sel["w"], sel["h"])])
+
+
 def render_block_size(painter: QPainter, analysis: FrameAnalysis) -> None:
     """Color each coding block by its size. Needs block data. For H.264 the
     coding unit is the fixed 16x16 macroblock, so the map is uniform there;
@@ -169,10 +182,8 @@ def render_block_size(painter: QPainter, analysis: FrameAnalysis) -> None:
     painter.setPen(Qt.PenStyle.NoPen)
     sizes = np.maximum(blocks["w"].astype(np.int32), blocks["h"].astype(np.int32))
     for sz in np.unique(sizes):
-        color = _size_color(int(sz))
-        sel = blocks[sizes == sz]
-        for x, y, w, h in zip(sel["x"], sel["y"], sel["w"], sel["h"]):
-            painter.fillRect(int(x), int(y), int(w), int(h), color)
+        _fill_rects(painter, blocks[sizes == sz], _size_color(int(sz)))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
 def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
@@ -183,9 +194,8 @@ def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(Qt.PenStyle.NoPen)
     for pred, color in _PRED_COLORS.items():
-        sel = blocks[blocks["pred"] == pred]
-        for x, y, w, h in zip(sel["x"], sel["y"], sel["w"], sel["h"]):
-            painter.fillRect(int(x), int(y), int(w), int(h), color)
+        _fill_rects(painter, blocks[blocks["pred"] == pred], color)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
 def _draw_lines(painter: QPainter, lines, color: QColor, width: int) -> None:
