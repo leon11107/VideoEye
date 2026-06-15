@@ -32,6 +32,7 @@ import numpy as np
 from .veye_sidecar import (
     VeyeFrameBlocks,
     bit_sizes_from_frame,
+    ctu_bit_sizes_from_frame,
     blocks_from_frame,
     load_sidecar,
     intra_modes_from_frame,
@@ -329,6 +330,19 @@ class BlockSidecar:
         """Per-CU bit-cost records (BITSIZE_DTYPE) for a frame, or None."""
         fb = self._frame(frame_index)
         return bit_sizes_from_frame(fb) if fb is not None else None
+
+    def ctu_bit_sizes_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """Per-CTU bit-cost records (BITSIZE_DTYPE, CTB-summed), or None."""
+        fb = self._frame(frame_index)
+        return ctu_bit_sizes_from_frame(fb) if fb is not None else None
+
+    def ctu_struct_for(self, frame_index: int):
+        """CTU structure (ctb_size, slice_grid, tile_col_bd, tile_row_bd) for a
+        frame, or None if not ready."""
+        fb = self._frame(frame_index)
+        if fb is None:
+            return None
+        return fb.ctb_size, fb.slice_grid, fb.tile_col_bd, fb.tile_row_bd
 
     def slice_lines_for(self, frame_index: int) -> Optional[np.ndarray]:
         """HEVC slice boundary segments (N,4) for a frame, or None."""

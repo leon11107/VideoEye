@@ -20,7 +20,7 @@ _RAW_FORMATS = frozenset(
 # Sidecar-derived analysis layers get_analysis can build. None == all of them.
 _ALL_ANALYSIS_LAYERS = frozenset(
     {"blocks", "pu", "tu_luma", "tu_chroma", "intra", "slice", "tile",
-     "mvs", "qp", "bits"}
+     "mvs", "qp", "bits", "bits_ctu"}
 )
 
 
@@ -311,6 +311,13 @@ class Decoder:
                 analysis.intra = self._block_sidecar.intra_modes_for(sc_index)
             if "bits" in want and analysis.bit_sizes is None:
                 analysis.bit_sizes = self._block_sidecar.bit_sizes_for(sc_index)
+            if "bits_ctu" in want and analysis.ctu_bit_sizes is None:
+                analysis.ctu_bit_sizes = \
+                    self._block_sidecar.ctu_bit_sizes_for(sc_index)
+                st = self._block_sidecar.ctu_struct_for(sc_index)
+                if st is not None:
+                    (analysis.ctb_size, analysis.slice_grid,
+                     analysis.tile_col_bd, analysis.tile_row_bd) = st
             if "slice" in want and analysis.slice_lines is None:
                 analysis.slice_lines = self._block_sidecar.slice_lines_for(sc_index)
             if "tile" in want and analysis.tile_lines is None:

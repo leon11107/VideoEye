@@ -169,11 +169,15 @@ def _bitsize_heatmap(painter: QPainter, sel, values) -> None:
 
 
 def render_bitsize(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
-    """Bit Size group (HEVC): per-CU coded bit cost as a grayscale heatmap --
-    total (CU), prediction (PU) or residual (TU). The metrics are separate
-    heatmaps; enabling more than one overdraws (pick one)."""
+    """Bit Size group (HEVC): coded bit cost as a grayscale heatmap -- per CU
+    (total / prediction / residual) or per CTU (whole-CTB total). The metrics
+    are separate heatmaps; enabling more than one overdraws (pick one)."""
     if not flags.get("bits"):
         return
+    if flags.get("bits_ctu"):
+        cs = analysis.ctu_bit_sizes
+        if cs is not None and len(cs):
+            _bitsize_heatmap(painter, cs, cs["cu"])
     bs = analysis.bit_sizes
     if bs is None or len(bs) == 0:
         return
@@ -388,6 +392,7 @@ OVERLAY_GROUPS = {
         ("bnd_tile", "Tile"),
     ), render_boundary),
     "bits": ("Bit Size", (
+        ("bits_ctu", "CTU"),
         ("bits_cu", "CU"),
         ("bits_pu", "PU"),
         ("bits_tu", "TU"),
@@ -420,7 +425,10 @@ def needed_layers(flags: dict) -> set:
     if flags.get("types"):
         need.add("blocks")
     if flags.get("bits"):
-        need.add("bits")
+        if flags.get("bits_ctu"):
+            need.add("bits_ctu")
+        if flags.get("bits_cu") or flags.get("bits_pu") or flags.get("bits_tu"):
+            need.add("bits")
     if flags.get(PARTITION_KEY):
         need.add("blocks")          # CU base is always drawn with partition
         if flags.get("part_pu"):

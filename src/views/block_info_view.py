@@ -265,12 +265,33 @@ class BlockHoverPanel(QWidget):
         qp = info.get("qp")
         mvs = info.get("mvs")
         bits = info.get("bits")
+        ctu_bits = info.get("ctu_bits")
         unit = info["unit"]
 
         loc = self._section("Location")
         self._row(loc, "pixel", f"({info['px']}, {info['py']})")
         self._row(loc, "block", f"({info['block_x']}, {info['block_y']})")
         self._row(loc, "unit", f"{unit}x{unit}")
+
+        # CTU section (Elecard block-presenter top group): the containing CTB's
+        # location, slice / tile membership and total coded bit cost. HEVC only.
+        ctu_org = info.get("ctu_origin")
+        if ctu_org is not None:
+            ctb_size = int(info.get("ctb_size") or 0)
+            ctu = self._section("CTU")
+            self._row(ctu, "location", f"({ctu_org[0]}, {ctu_org[1]})")
+            if ctb_size:
+                self._row(ctu, "dimensions", f"{ctb_size}x{ctb_size}")
+            sidx = info.get("slice_idx")
+            tidx = info.get("tile_idx")
+            if sidx is not None:
+                self._row(ctu, "slice idx", str(int(sidx)))
+            if tidx is not None:
+                self._row(ctu, "tile idx", str(int(tidx)))
+            if ctu_bits is not None:
+                size = QTreeWidgetItem(ctu, ["size", f"{int(ctu_bits['cu'])} bits"])
+                _kv_row(size, "prediction", str(int(ctu_bits["pu"])))
+                _kv_row(size, "transform", str(int(ctu_bits["tu"])))
 
         cu = self._section("Coded Unit")
         if block is not None:

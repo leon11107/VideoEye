@@ -233,6 +233,11 @@ class DecodedView(QWidget):
             "mvs": a.mvs_at(px, py),
             "block": a.block_at(px, py),
             "bits": a.bits_at(px, py),
+            "ctu_bits": a.ctu_bits_at(px, py),
+            "ctu_origin": a.ctu_origin(px, py),
+            "ctb_size": a.ctb_size,
+            "slice_idx": a.slice_idx_at(px, py),
+            "tile_idx": a.tile_idx_at(px, py),
         }
         self.block_hovered.emit(info)
 

@@ -112,6 +112,15 @@ class FrameAnalysis:
 
     # Per-CU coded bit cost (BITSIZE_DTYPE) for the Bit Size heatmap (HEVC).
     bit_sizes: Optional[np.ndarray] = None
+    # Per-CTU coded bit cost (BITSIZE_DTYPE, summed over the CTB's CUs) for the
+    # CTU-level Bit Size heatmap and the CTU block-info section (HEVC).
+    ctu_bit_sizes: Optional[np.ndarray] = None
+    # CTU structure (HEVC): CTB size px, per-CTB slice id grid, tile column/row
+    # pixel boundaries -- for the CTU block-info location / slice / tile fields.
+    ctb_size: int = 0
+    slice_grid: Optional[np.ndarray] = None
+    tile_col_bd: tuple = ()
+    tile_row_bd: tuple = ()
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -159,6 +168,50 @@ class FrameAnalysis:
         )
         hits = b[mask]
         return hits[0] if len(hits) else None
+
+    def ctu_bits_at(self, px: int, py: int):
+        """Per-CTU bit-cost record (BITSIZE_DTYPE, summed over the CTB), or
+        None."""
+        if (self.ctu_bit_sizes is None or len(self.ctu_bit_sizes) == 0
+                or px < 0 or py < 0):
+            return None
+        b = self.ctu_bit_sizes
+        mask = (
+            (b["x"] <= px) & (px < b["x"] + b["w"])
+            & (b["y"] <= py) & (py < b["y"] + b["h"])
+        )
+        hits = b[mask]
+        return hits[0] if len(hits) else None
+
+    def ctu_origin(self, px: int, py: int):
+        """Pixel origin (ox, oy) of the CTB covering (px, py), or None."""
+        if self.ctb_size <= 0 or px < 0 or py < 0:
+            return None
+        return (px // self.ctb_size) * self.ctb_size, \
+               (py // self.ctb_size) * self.ctb_size
+
+    def slice_idx_at(self, px: int, py: int) -> Optional[int]:
+        """Slice id of the CTB covering (px, py), or None."""
+        if self.slice_grid is None or self.ctb_size <= 0 or px < 0 or py < 0:
+            return None
+        row, col = py // self.ctb_size, px // self.ctb_size
+        if row >= self.slice_grid.shape[0] or col >= self.slice_grid.shape[1]:
+            return None
+        return int(self.slice_grid[row, col])
+
+    def tile_idx_at(self, px: int, py: int) -> Optional[int]:
+        """Tile index (raster order over the tile grid) at (px, py), or None.
+
+        Tile column/row boundaries are pixel x/y of the left/top edge of each
+        tile (first entry 0). The index is row * n_tile_cols + col.
+        """
+        if not self.tile_col_bd or not self.tile_row_bd or px < 0 or py < 0:
+            return None
+        col = sum(1 for b in self.tile_col_bd if b <= px) - 1
+        row = sum(1 for b in self.tile_row_bd if b <= py) - 1
+        if col < 0 or row < 0:
+            return None
+        return row * len(self.tile_col_bd) + col
 
     def block_at(self, px: int, py: int):
         """Coding block (BLOCK_DTYPE record) covering pixel (px, py), or None.

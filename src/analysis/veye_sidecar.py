@@ -896,6 +896,42 @@ def bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     return out
 
 
+def ctu_bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Per-CTU coded bit cost (BITSIZE_DTYPE): the total / prediction / residual
+    bits summed over every CU in each CTB. One record per CTB. Empty for codecs
+    without bit data.
+
+    cu_bits/pu_bits/tu_bits hold each CU's bits at its top-left cell (0
+    elsewhere), so block-summing the grid over a CTB's cells yields the CTB
+    total exactly.
+    """
+    if (fb.codec_id != _CODEC_HEVC or fb.cu_bits is None or fb.ctb_size <= 0):
+        return np.empty(0, dtype=BITSIZE_DTYPE)
+    unit = fb.block_unit
+    ratio = max(1, fb.ctb_size // unit)     # min-CB cells per CTB side
+    gh, gw = fb.cu_bits.shape
+    cth = (gh + ratio - 1) // ratio
+    ctw = (gw + ratio - 1) // ratio
+
+    def block_sum(g: np.ndarray) -> np.ndarray:
+        gp = np.pad(g, ((0, cth * ratio - gh), (0, ctw * ratio - gw)))
+        return gp.reshape(cth, ratio, ctw, ratio).sum(axis=(1, 3))
+
+    cu = block_sum(fb.cu_bits)
+    pu = block_sum(fb.pu_bits)
+    tu = block_sum(fb.tu_bits)
+    ys, xs = np.mgrid[0:cth, 0:ctw]
+    out = np.empty(cth * ctw, dtype=BITSIZE_DTYPE)
+    out["x"] = (xs * fb.ctb_size).ravel()
+    out["y"] = (ys * fb.ctb_size).ravel()
+    out["w"] = fb.ctb_size
+    out["h"] = fb.ctb_size
+    out["cu"] = cu.ravel()
+    out["pu"] = pu.ravel()
+    out["tu"] = tu.ravel()
+    return out
+
+
 def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """HEVC slice boundary segments [x1,y1,x2,y2] (px): the CTB edges where the
     slice id changes between neighbours. Returns an (N,4) int32 array."""
