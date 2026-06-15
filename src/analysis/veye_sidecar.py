@@ -308,6 +308,12 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         ref = np.empty((grid_h, grid_w, 2), dtype=np.int8)
         ref[..., 0] = recs["ref0"].reshape(grid_h, grid_w)
         ref[..., 1] = recs["ref1"].reshape(grid_h, grid_w)
+        # NOTE: an AV1 reference section (own + referenced order hints) is
+        # written by the probe but intentionally NOT parsed here yet: the
+        # libaom inspection callback mis-associates per-frame data with output
+        # frames on reordered streams (one Temporal Unit decodes multiple
+        # frames but only the last inspection is kept), so frame-chart ref
+        # markers cannot be resolved correctly until that is fixed.
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
             qp=recs["qp"].reshape(grid_h, grid_w).copy(),
