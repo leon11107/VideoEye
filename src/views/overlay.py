@@ -151,23 +151,38 @@ def _fill_rects(painter: QPainter, sel, color: QColor) -> None:
                                              sel["w"], sel["h"])])
 
 
-def render_block_size(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Elecard-style block-size heatmap: each coding block filled an opaque
-    grey by its size -- small (finely split, detailed) blocks bright, large
-    (flat) blocks dark. For H.264 the coding unit is the fixed 16x16 macroblock
-    so the map is uniform; HEVC CUs (8..64) and AV1 blocks vary."""
-    blocks = analysis.blocks
-    if blocks is None or len(blocks) == 0:
+def _bitsize_heatmap(painter: QPainter, sel, values) -> None:
+    """Opaque grayscale heatmap of a per-CU bit metric, normalized to the
+    frame's peak (bright = more bits, Elecard-style)."""
+    if len(sel) == 0:
         return
+    maxv = float(values.max())
+    if maxv <= 0:
+        return
+    gray = np.clip(values.astype(np.float32) * (255.0 / maxv), 0, 255)
+    gq = (gray.astype(np.int32) // 8) * 8       # quantize to limit fill groups
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(Qt.PenStyle.NoPen)
-    sizes = np.maximum(blocks["w"].astype(np.int32), blocks["h"].astype(np.int32))
-    # Map log2(size) 3..6 (8..64 px) to a bright..dark grey ramp; clamp others.
-    lg = np.clip(np.round(np.log2(np.maximum(1, sizes))).astype(np.int32), 3, 7)
-    gray = np.clip(255 - (lg - 3) * 55, 30, 255)
-    for g in np.unique(gray):
-        _fill_rects(painter, blocks[gray == g], QColor(int(g), int(g), int(g)))
+    for lvl in np.unique(gq):
+        _fill_rects(painter, sel[gq == lvl], QColor(int(lvl), int(lvl), int(lvl)))
     painter.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def render_bitsize(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
+    """Bit Size group (HEVC): per-CU coded bit cost as a grayscale heatmap --
+    total (CU), prediction (PU) or residual (TU). The metrics are separate
+    heatmaps; enabling more than one overdraws (pick one)."""
+    if not flags.get("bits"):
+        return
+    bs = analysis.bit_sizes
+    if bs is None or len(bs) == 0:
+        return
+    if flags.get("bits_cu"):
+        _bitsize_heatmap(painter, bs, bs["cu"])
+    if flags.get("bits_pu"):
+        _bitsize_heatmap(painter, bs, bs["pu"])
+    if flags.get("bits_tu"):
+        _bitsize_heatmap(painter, bs, bs["tu"])
 
 
 def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
@@ -347,7 +362,6 @@ def render_boundary(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> 
 OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
     "types": ("Block Types", render_block_types),
-    "blocksize": ("Block Size", render_block_size),
 }
 
 # Collapsible overlay groups (rendered like a menu, mirroring Partition):
@@ -373,6 +387,11 @@ OVERLAY_GROUPS = {
         ("bnd_slice", "Slice"),
         ("bnd_tile", "Tile"),
     ), render_boundary),
+    "bits": ("Bit Size", (
+        ("bits_cu", "CU"),
+        ("bits_pu", "PU"),
+        ("bits_tu", "TU"),
+    ), render_bitsize),
 }
 
 # Every overlay flag key (flat overlays + group masters + group sub-layers).
@@ -387,6 +406,7 @@ DEFAULT_ON = (
     "part_pu",
     "mode_inter", "mode_intra_angular", "mode_intra_plane", "mode_intra_dc",
     "bnd_slice", "bnd_tile",
+    "bits_cu",      # Bit Size group defaults to the CU-total heatmap
 )
 
 
@@ -397,8 +417,10 @@ def needed_layers(flags: dict) -> set:
     need: set = set()
     if flags.get("qp"):
         need.add("qp")
-    if flags.get("types") or flags.get("blocksize"):
+    if flags.get("types"):
         need.add("blocks")
+    if flags.get("bits"):
+        need.add("bits")
     if flags.get(PARTITION_KEY):
         need.add("blocks")          # CU base is always drawn with partition
         if flags.get("part_pu"):

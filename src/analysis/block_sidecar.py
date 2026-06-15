@@ -31,6 +31,7 @@ import numpy as np
 
 from .veye_sidecar import (
     VeyeFrameBlocks,
+    bit_sizes_from_frame,
     blocks_from_frame,
     load_sidecar,
     intra_modes_from_frame,
@@ -108,7 +109,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v9"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v10"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -323,6 +324,11 @@ class BlockSidecar:
         """Intra-prediction records (INTRA_DTYPE) for a frame, or None."""
         fb = self._frame(frame_index)
         return intra_modes_from_frame(fb) if fb is not None else None
+
+    def bit_sizes_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """Per-CU bit-cost records (BITSIZE_DTYPE) for a frame, or None."""
+        fb = self._frame(frame_index)
+        return bit_sizes_from_frame(fb) if fb is not None else None
 
     def slice_lines_for(self, frame_index: int) -> Optional[np.ndarray]:
         """HEVC slice boundary segments (N,4) for a frame, or None."""

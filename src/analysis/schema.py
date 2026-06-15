@@ -38,6 +38,18 @@ INTRA_DTYPE = np.dtype([
     ("cat", np.uint8),      # INTRA_DC / INTRA_PLANE / INTRA_ANGULAR
 ])
 
+# Per-CU coded bit cost (HEVC): one record per coding unit, carrying the total
+# and the prediction / residual split (bits). Used by the Bit Size heatmap.
+BITSIZE_DTYPE = np.dtype([
+    ("x", np.int16),
+    ("y", np.int16),
+    ("w", np.uint8),
+    ("h", np.uint8),
+    ("cu", np.int32),       # total bits coding this CU
+    ("pu", np.int32),       # prediction-syntax bits
+    ("tu", np.int32),       # residual (transform) bits
+])
+
 # Normalized coding block record (partition + prediction type).
 BLOCK_DTYPE = np.dtype([
     ("x", np.int16),
@@ -97,6 +109,9 @@ class FrameAnalysis:
     # Intra prediction records (INTRA_DTYPE) for the intra-mode overlays
     # (angular / planar / DC). None when not built or unavailable (H.264).
     intra: Optional[np.ndarray] = None
+
+    # Per-CU coded bit cost (BITSIZE_DTYPE) for the Bit Size heatmap (HEVC).
+    bit_sizes: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.

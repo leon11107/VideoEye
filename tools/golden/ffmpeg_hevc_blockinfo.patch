@@ -1,12 +1,15 @@
 diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
-index 7bb4fe9..897ab39 100644
+index 7bb4fe9..1d69923 100644
 --- a/libavcodec/hevc/hevcdec.c
 +++ b/libavcodec/hevc/hevcdec.c
-@@ -77,10 +77,12 @@ static void pic_arrays_free(HEVCLayerContext *l)
+@@ -77,10 +77,15 @@ static void pic_arrays_free(HEVCLayerContext *l)
  
      av_freep(&l->skip_flag);
      av_freep(&l->tab_ct_depth);
 +    av_freep(&l->tab_part_mode);
++    av_freep(&l->tab_cu_bits);
++    av_freep(&l->tab_pu_bits);
++    av_freep(&l->tab_tu_bits);
  
      av_freep(&l->tab_ipm);
      av_freep(&l->cbf_luma);
@@ -15,7 +18,7 @@ index 7bb4fe9..897ab39 100644
  
      av_freep(&l->qp_y_tab);
      av_freep(&l->tab_slice_address);
-@@ -117,15 +119,17 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
+@@ -117,15 +122,26 @@ static int pic_arrays_init(HEVCLayerContext *l, const HEVCSPS *sps)
      if (!l->sao || !l->deblock)
          goto fail;
  
@@ -26,6 +29,15 @@ index 7bb4fe9..897ab39 100644
 +    l->tab_ct_depth  = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
 +    l->tab_part_mode = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
 +    if (!l->skip_flag || !l->tab_ct_depth || !l->tab_part_mode)
++        goto fail;
++
++    l->tab_cu_bits = av_calloc(sps->min_cb_height * sps->min_cb_width,
++                               sizeof(*l->tab_cu_bits));
++    l->tab_pu_bits = av_calloc(sps->min_cb_height * sps->min_cb_width,
++                               sizeof(*l->tab_pu_bits));
++    l->tab_tu_bits = av_calloc(sps->min_cb_height * sps->min_cb_width,
++                               sizeof(*l->tab_tu_bits));
++    if (!l->tab_cu_bits || !l->tab_pu_bits || !l->tab_tu_bits)
          goto fail;
  
      l->cbf_luma = av_malloc_array(sps->min_tb_width, sps->min_tb_height);
@@ -37,7 +49,7 @@ index 7bb4fe9..897ab39 100644
          goto fail;
  
      l->filter_slice_edges = av_mallocz(ctb_count);
-@@ -1309,6 +1313,19 @@ static int hls_transform_unit(HEVCLocalContext *lc,
+@@ -1309,6 +1325,19 @@ static int hls_transform_unit(HEVCLocalContext *lc,
      const int log2_trafo_size_c = log2_trafo_size - sps->hshift[1];
      int i;
  
@@ -57,7 +69,7 @@ index 7bb4fe9..897ab39 100644
      if (lc->cu.pred_mode == MODE_INTRA) {
          int trafo_size = 1 << log2_trafo_size;
          ff_hevc_set_neighbour_available(lc, x0, y0, trafo_size, trafo_size, sps->log2_ctb_size);
-@@ -2316,6 +2333,22 @@ static av_always_inline void set_ct_depth(const HEVCSPS *sps, uint8_t *tab_ct_de
+@@ -2316,6 +2345,22 @@ static av_always_inline void set_ct_depth(const HEVCSPS *sps, uint8_t *tab_ct_de
                 ct_depth, length);
  }
  
@@ -80,7 +92,58 @@ index 7bb4fe9..897ab39 100644
  static const uint8_t tab_mode_idx[] = {
       0,  1,  2,  2,  2,  2,  3,  5,  7,  8, 10, 12, 13, 15, 17, 18, 19, 20,
      21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31};
-@@ -2598,6 +2631,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+@@ -2436,6 +2481,11 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+     lc->cu.part_mode        = PART_2Nx2N;
+     lc->cu.intra_split_flag = 0;
+ 
++    /* VideoEye: CABAC read position at CU start / after prediction syntax, to
++     * derive this CU's coded bit cost (total / prediction / residual). */
++    const uint8_t *veye_bs_start = lc->cc.bytestream;
++    const uint8_t *veye_bs_pred_end = veye_bs_start;
++
+     SAMPLE_CTB(l->skip_flag, x_cb, y_cb) = 0;
+     for (x = 0; x < 4; x++)
+         lc->pu.intra_pred_mode[x] = 1;
+@@ -2471,6 +2521,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+         hls_prediction_unit(lc, l, pps, sps,
+                             x0, y0, cb_size, cb_size, log2_cb_size, 0, idx);
+         intra_prediction_unit_default_value(lc, l, sps, x0, y0, log2_cb_size);
++        veye_bs_pred_end = lc->cc.bytestream;  // skip CU: no residual
+ 
+         if (!s->sh.disable_deblocking_filter_flag)
+             ff_hevc_deblocking_boundary_strengths(lc, l, pps, x0, y0, log2_cb_size);
+@@ -2559,6 +2610,8 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+             }
+         }
+ 
++        veye_bs_pred_end = lc->cc.bytestream;  // prediction syntax ends here
++
+         if (!pcm_flag) {
+             int rqt_root_cbf = 1;
+ 
+@@ -2583,6 +2636,21 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
+         }
+     }
+ 
++    /* VideoEye: record this CU's coded bit cost at its top-left min-CB. The
++     * CABAC bytestream advances as symbols are read, so position deltas give an
++     * (byte-resolution) approximation of bits spent on prediction vs residual. */
++    {
++        const uint8_t *bs_end = lc->cc.bytestream;
++        int total = (int)(bs_end - veye_bs_start) * 8;
++        int pu    = (int)(veye_bs_pred_end - veye_bs_start) * 8;
++        int cb_idx = y_cb * min_cb_width + x_cb;
++        if (total < 0) total = 0;
++        if (pu < 0 || pu > total) pu = total;
++        l->tab_cu_bits[cb_idx] = total;
++        l->tab_pu_bits[cb_idx] = pu;
++        l->tab_tu_bits[cb_idx] = total - pu;
++    }
++
+     if (pps->cu_qp_delta_enabled_flag && lc->tu.is_cu_qp_delta_coded == 0)
+         ff_hevc_set_qPy(lc, l, pps, x0, y0, log2_cb_size);
+ 
+@@ -2598,6 +2666,7 @@ static int hls_coding_unit(HEVCLocalContext *lc, const HEVCContext *s,
      }
  
      set_ct_depth(sps, l->tab_ct_depth, x0, y0, log2_cb_size, lc->ct_depth);
@@ -88,7 +151,7 @@ index 7bb4fe9..897ab39 100644
  
      return 0;
  }
-@@ -3281,6 +3315,7 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+@@ -3281,6 +3350,7 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
      memset(l->horizontal_bs, 0, l->bs_width * l->bs_height);
      memset(l->vertical_bs,   0, l->bs_width * l->bs_height);
      memset(l->cbf_luma,      0, sps->min_tb_width * sps->min_tb_height);
@@ -96,7 +159,7 @@ index 7bb4fe9..897ab39 100644
      memset(l->is_pcm,        0, (sps->min_pu_width + 1) * (sps->min_pu_height + 1));
      memset(l->tab_slice_address, -1, pic_size_in_ctb * sizeof(*l->tab_slice_address));
  
-@@ -3387,8 +3422,14 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
+@@ -3387,8 +3457,14 @@ static int hevc_frame_start(HEVCContext *s, HEVCLayerContext *l,
      if (!s->avctx->hwaccel) {
          AVFrame *vf = s->cur_frame->needs_fg ? s->cur_frame->frame_grain
                                               : s->cur_frame->f;
@@ -112,7 +175,7 @@ index 7bb4fe9..897ab39 100644
      }
  
      ret = ff_hevc_output_frames(s, s->layers_active_decode, s->layers_active_output,
-@@ -3546,13 +3587,35 @@ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
+@@ -3546,13 +3622,36 @@ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
      if (l->sps && !s->avctx->hwaccel) {
          const HEVCSPS *sps = l->sps;
          AVFrame *vf = out->needs_fg ? out->frame_grain : out->f;
@@ -145,6 +208,7 @@ index 7bb4fe9..897ab39 100644
 +            out->poc, l0_poc, nb_l0, l1_poc, nb_l1,
 +            l->tab_slice_address, sps->ctb_width, sps->ctb_height, ntc, ntr,
 +            pps ? pps->col_bd : NULL, pps ? pps->row_bd : NULL,
++            l->tab_cu_bits, l->tab_pu_bits, l->tab_tu_bits,
              sps->min_cb_width, sps->min_cb_height, sps->min_pu_width,
 -            sps->log2_min_cb_size, sps->log2_ctb_size, sps->log2_min_pu_size);
 +            sps->min_tb_width, sps->min_tb_height,
@@ -154,14 +218,20 @@ index 7bb4fe9..897ab39 100644
  
      return 0;
 diff --git a/libavcodec/hevc/hevcdec.h b/libavcodec/hevc/hevcdec.h
-index 911d5c3..3a2fd9d 100644
+index 911d5c3..8df29c6 100644
 --- a/libavcodec/hevc/hevcdec.h
 +++ b/libavcodec/hevc/hevcdec.h
-@@ -466,11 +466,13 @@ typedef struct HEVCLayerContext {
+@@ -466,11 +466,19 @@ typedef struct HEVCLayerContext {
      //  CU
      uint8_t                *skip_flag;
      uint8_t                *tab_ct_depth;
 +    uint8_t                *tab_part_mode; // VideoEye: PU part_mode per min-CB
++    // VideoEye: coded bit cost per CU, stored at the CU's top-left min-CB.
++    // tab_cu_bits = total; tab_pu_bits = prediction syntax; tab_tu_bits =
++    // residual/transform. Derived from CABAC bytestream position deltas.
++    int32_t                *tab_cu_bits;
++    int32_t                *tab_pu_bits;
++    int32_t                *tab_tu_bits;
  
      // PU
      uint8_t                *cbf_luma; // cbf_luma of colocated TU
@@ -172,7 +242,7 @@ index 911d5c3..3a2fd9d 100644
      // CTB-level flags affecting loop filter operation
      uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..264aab9 100644
+index 2d817c7..617f623 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
 @@ -7,25 +7,36 @@
@@ -235,7 +305,7 @@ index 2d817c7..264aab9 100644
      return 0;
  }
  
-@@ -62,16 +87,41 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -62,16 +87,43 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
  
  /* Allocate the HEVC side data on @frame (or return the one already attached)
   * and (re)write its header. On a fresh allocation the records are zeroed. */
@@ -253,8 +323,10 @@ index 2d817c7..264aab9 100644
 +                       + n_ctb * sizeof(int32_t)
 +                       + (size_t)(num_tile_cols + 1) * sizeof(uint32_t)
 +                       + (size_t)(num_tile_rows + 1) * sizeof(uint32_t);
++    size_t bits_sz = 3 * n_cb * sizeof(int32_t);  // cu/pu/tu bit-cost grids
 +    return sizeof(VeyeBlockInfoHeader) + n_cb * sizeof(VeyeBlockRecordHEVC)
-+           + sizeof(VeyeTuHeader) + n_tb + sizeof(VeyeRefHeader) + struct_sz;
++           + sizeof(VeyeTuHeader) + n_tb + sizeof(VeyeRefHeader)
++           + struct_sz + bits_sz;
 +}
 +
  static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
@@ -281,7 +353,7 @@ index 2d817c7..264aab9 100644
  
      sd = av_frame_get_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO);
      if (sd && sd->size == size) {
-@@ -94,31 +144,56 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
+@@ -94,31 +146,59 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
      hdr->grid_w      = (uint32_t)min_cb_width;
      hdr->grid_h      = (uint32_t)min_cb_height;
      hdr->block_unit  = (uint32_t)(1 << log2_min_cb_size);
@@ -334,6 +406,9 @@ index 2d817c7..264aab9 100644
 +                                  int num_tile_cols, int num_tile_rows,
 +                                  const unsigned int *col_bd,
 +                                  const unsigned int *row_bd,
++                                  const int32_t *tab_cu_bits,
++                                  const int32_t *tab_pu_bits,
++                                  const int32_t *tab_tu_bits,
                                    int min_cb_width, int min_cb_height,
                                    int min_pu_width,
 +                                  int min_tb_width, int min_tb_height,
@@ -343,7 +418,7 @@ index 2d817c7..264aab9 100644
  {
      VeyeBlockRecordHEVC *rec;
      AVFrameSideData *sd;
-@@ -129,7 +204,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -129,7 +209,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
          return 0;
  
      sd = veye_hevc_side_data(frame, min_cb_width, min_cb_height,
@@ -354,7 +429,7 @@ index 2d817c7..264aab9 100644
      if (!sd)
          return AVERROR(ENOMEM);
  
-@@ -142,31 +219,257 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -142,31 +224,275 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -465,6 +540,24 @@ index 2d817c7..264aab9 100644
 +                cbd[t] = (uint32_t)((col_bd ? col_bd[t] : 0) * ctb_size);
 +            for (t = 0; t <= num_tile_rows; t++)
 +                rbd[t] = (uint32_t)((row_bd ? row_bd[t] : 0) * ctb_size);
++
++            /* Bit-cost section (v7): cu/pu/tu bit grids (min-CB raster), after
++             * the tile boundaries. Values are stored at CU top-left cells. */
++            {
++                size_t boff = soff + sizeof(VeyeStructHeader)
++                            + n_ctb * sizeof(int32_t)
++                            + (size_t)(num_tile_cols + 1) * sizeof(uint32_t)
++                            + (size_t)(num_tile_rows + 1) * sizeof(uint32_t);
++                int32_t *cu_b = (int32_t *)(sd->data + boff);
++                int32_t *pu_b = cu_b + n_cb;
++                int32_t *tu_b = pu_b + n_cb;
++                if (tab_cu_bits) memcpy(cu_b, tab_cu_bits, n_cb * sizeof(int32_t));
++                else memset(cu_b, 0, n_cb * sizeof(int32_t));
++                if (tab_pu_bits) memcpy(pu_b, tab_pu_bits, n_cb * sizeof(int32_t));
++                else memset(pu_b, 0, n_cb * sizeof(int32_t));
++                if (tab_tu_bits) memcpy(tu_b, tab_tu_bits, n_cb * sizeof(int32_t));
++                else memset(tu_b, 0, n_cb * sizeof(int32_t));
++            }
 +        }
 +    }
 +
@@ -618,7 +711,7 @@ index 2d817c7..264aab9 100644
      return 0;
  }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..69dc161 100644
+index eadfb7b..c256469 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,10 @@
@@ -626,7 +719,7 @@ index eadfb7b..69dc161 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 6
++#define VEYE_BI_VERSION 7
 +
 +/* Max reference POCs recorded per list in the appended ref section. */
 +#define VEYE_MAX_REFS 16
@@ -691,7 +784,7 @@ index eadfb7b..69dc161 100644
  /*
   * HEVC cells are emitted at min-CB (typically 8x8) granularity. Unlike the
   * fixed-size H.264 macroblock, an HEVC coding unit spans a variable number
-@@ -49,10 +103,62 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -49,10 +103,70 @@ typedef struct VeyeBlockRecordHEVC {
      uint8_t  cu_log2;     ///< log2 of the luma CU size in pixels (3..6)
      uint8_t  pred;        ///< PredType: 1 intra, 2 inter, 3 skip, 4 pcm
      uint8_t  intra_mode;  ///< luma intra prediction mode 0..34 (intra only)
@@ -752,10 +845,18 @@ index eadfb7b..69dc161 100644
 +    uint32_t num_tile_rows;  ///< number of tile rows (>= 1)
 +} VeyeStructHeader;
 +
++/*
++ * VideoEye v7 (HEVC): after the picture-structure section, three int32 min-CB
++ * grids give each CU's coded bit cost -- cu_bits (total), pu_bits (prediction
++ * syntax), tu_bits (residual) -- stored at the CU's top-left min-CB (other
++ * cells are unused; the consumer reads at CU origins). Each grid is
++ * min_cb_width * min_cb_height int32 values in raster order.
++ */
++
  /**
   * Serialize a per-cell grid into AV_FRAME_DATA_VEYE_BLOCKINFO side data and
   * attach it to @p frame. Reads are indexed with @p grid_stride; output is
-@@ -61,6 +167,9 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -61,6 +175,9 @@ typedef struct VeyeBlockRecordHEVC {
   */
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
@@ -765,7 +866,7 @@ index eadfb7b..69dc161 100644
                               int grid_w, int grid_h, int grid_stride,
                               int block_unit);
  
-@@ -74,7 +183,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -74,7 +191,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
   * frame. Records are zero-initialized. Returns 0 on success/skip, ENOMEM else.
   */
  int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
@@ -778,7 +879,7 @@ index eadfb7b..69dc161 100644
  
  /**
   * Serialize an HEVC min-CB grid into AV_FRAME_DATA_VEYE_BLOCKINFO. The HEVC
-@@ -83,26 +196,47 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+@@ -83,26 +204,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
   * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
   * one is already attached, otherwise allocates a fresh one.
   *
@@ -824,6 +925,9 @@ index eadfb7b..69dc161 100644
 +                                  int num_tile_cols, int num_tile_rows,
 +                                  const unsigned int *col_bd,
 +                                  const unsigned int *row_bd,
++                                  const int32_t *tab_cu_bits,
++                                  const int32_t *tab_pu_bits,
++                                  const int32_t *tab_tu_bits,
                                    int min_cb_width, int min_cb_height,
                                    int min_pu_width,
 +                                  int min_tb_width, int min_tb_height,

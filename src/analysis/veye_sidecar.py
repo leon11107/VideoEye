@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 
 from .schema import (
-    BLOCK_DTYPE, MV_DTYPE, PredType,
+    BLOCK_DTYPE, MV_DTYPE, PredType, BITSIZE_DTYPE,
     INTRA_DTYPE, INTRA_DC, INTRA_PLANE, INTRA_ANGULAR,
 )
 
@@ -146,6 +146,9 @@ class VeyeFrameBlocks:
     slice_grid: Optional[np.ndarray] = None  # HEVC: (ctb_h, ctb_w) i32 slice id
     tile_col_bd: tuple = ()                 # HEVC: tile column x-boundaries (px)
     tile_row_bd: tuple = ()                 # HEVC: tile row y-boundaries (px)
+    cu_bits: Optional[np.ndarray] = None    # HEVC: total bits per CU origin (v7)
+    pu_bits: Optional[np.ndarray] = None    # HEVC: prediction-syntax bits
+    tu_bits: Optional[np.ndarray] = None    # HEVC: residual bits
     mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
     ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
     bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
@@ -286,6 +289,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         slice_grid = None
         tile_col_bd: tuple = ()
         tile_row_bd: tuple = ()
+        cu_bits = pu_bits = tu_bits = None
         if _ver >= 4:
             tu_off = _BLK_HDR.size + n_records * _REC_HEVC.itemsize
             if len(payload) >= tu_off + _TU_HDR.size:
@@ -324,6 +328,17 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                         tile_row_bd = tuple(np.frombuffer(
                             payload, dtype="<u4", count=ntr + 1, offset=rbd_off
                         ).tolist())
+                        # v7: cu/pu/tu bit-cost grids (min-CB raster) follow.
+                        b_off = rbd_off + (ntr + 1) * 4
+                        if (_ver >= 7
+                                and len(payload) >= b_off + 3 * n_records * 4):
+                            def _bg(o):
+                                return np.frombuffer(
+                                    payload, dtype="<i4", count=n_records,
+                                    offset=o).reshape(grid_h, grid_w).copy()
+                            cu_bits = _bg(b_off)
+                            pu_bits = _bg(b_off + n_records * 4)
+                            tu_bits = _bg(b_off + 2 * n_records * 4)
 
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
@@ -338,6 +353,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
             ctb_size=ctb_size, slice_grid=slice_grid,
             tile_col_bd=tile_col_bd, tile_row_bd=tile_row_bd,
+            cu_bits=cu_bits, pu_bits=pu_bits, tu_bits=tu_bits,
             mv=mv, ref_idx=ref,
         )
 
@@ -849,6 +865,35 @@ def tu_chroma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     if fb.codec_id == _CODEC_AV1:
         return _av1_tus(fb, chroma=True)
     return _tu_rects(fb, chroma=True)
+
+
+def bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Per-CU coded bit cost (BITSIZE_DTYPE) for the HEVC Bit Size heatmap.
+    One record per CU (emitted at the CU's top-left cell), carrying total /
+    prediction / residual bits. Empty for codecs without bit data."""
+    if (fb.codec_id != _CODEC_HEVC or fb.cu_log2 is None
+            or fb.cu_bits is None):
+        return np.empty(0, dtype=BITSIZE_DTYPE)
+    unit = fb.block_unit
+    gh, gw = fb.cu_log2.shape
+    cl = fb.cu_log2.astype(np.int32)
+    span = np.maximum(1, (1 << cl) // unit)
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = ((mx % span) == 0) & ((my % span) == 0)
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BITSIZE_DTYPE)
+    cu_px = (1 << cl[ys, xs]).astype(np.int32)
+    out = np.empty(len(xs), dtype=BITSIZE_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = cu_px
+    out["h"] = cu_px
+    out["cu"] = fb.cu_bits[ys, xs]
+    out["pu"] = fb.pu_bits[ys, xs]
+    out["tu"] = fb.tu_bits[ys, xs]
+    return out
 
 
 def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
