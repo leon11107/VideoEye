@@ -139,29 +139,6 @@ def render_partition(painter: QPainter, analysis: FrameAnalysis, flags: dict) ->
     _draw_cu(painter, analysis)  # CU base, on top so its edges read as black
 
 
-# Block-size overlay: each coding block tinted by its size (max dimension),
-# warm (small, finely split) -> cool (large, flat). Mirrors Elecard's block-
-# size view; exact dimensions live in the hover panel. Keyed by power-of-two
-# luma size; non-listed sizes snap to the nearest key.
-_SIZE_COLORS = {
-    4:   QColor(214, 40, 40, 120),    # red
-    8:   QColor(244, 140, 40, 120),   # orange
-    16:  QColor(236, 214, 50, 120),   # yellow
-    32:  QColor(70, 196, 90, 120),    # green
-    64:  QColor(60, 140, 240, 120),   # blue
-    128: QColor(150, 80, 224, 120),   # purple
-}
-
-
-def _size_color(sz: int) -> QColor:
-    """Tint color for a block whose max dimension is `sz` px."""
-    color = _SIZE_COLORS.get(sz)
-    if color is not None:
-        return color
-    nearest = min(_SIZE_COLORS, key=lambda k: abs(k - sz))
-    return _SIZE_COLORS[nearest]
-
-
 def _fill_rects(painter: QPainter, sel, color: QColor) -> None:
     """Fill a BLOCK_DTYPE selection in one batched call. drawRects() with a
     brush and no pen fills each rect -- far cheaper than a fillRect() per rect
@@ -175,17 +152,21 @@ def _fill_rects(painter: QPainter, sel, color: QColor) -> None:
 
 
 def render_block_size(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """Color each coding block by its size. Needs block data. For H.264 the
-    coding unit is the fixed 16x16 macroblock, so the map is uniform there;
-    HEVC CUs (8..64) and AV1 blocks vary and show the partition granularity."""
+    """Elecard-style block-size heatmap: each coding block filled an opaque
+    grey by its size -- small (finely split, detailed) blocks bright, large
+    (flat) blocks dark. For H.264 the coding unit is the fixed 16x16 macroblock
+    so the map is uniform; HEVC CUs (8..64) and AV1 blocks vary."""
     blocks = analysis.blocks
     if blocks is None or len(blocks) == 0:
         return
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(Qt.PenStyle.NoPen)
     sizes = np.maximum(blocks["w"].astype(np.int32), blocks["h"].astype(np.int32))
-    for sz in np.unique(sizes):
-        _fill_rects(painter, blocks[sizes == sz], _size_color(int(sz)))
+    # Map log2(size) 3..6 (8..64 px) to a bright..dark grey ramp; clamp others.
+    lg = np.clip(np.round(np.log2(np.maximum(1, sizes))).astype(np.int32), 3, 7)
+    gray = np.clip(255 - (lg - 3) * 55, 30, 255)
+    for g in np.unique(gray):
+        _fill_rects(painter, blocks[gray == g], QColor(int(g), int(g), int(g)))
     painter.setBrush(Qt.BrushStyle.NoBrush)
 
 
