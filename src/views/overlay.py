@@ -328,7 +328,9 @@ def render_intra_plane(painter: QPainter, analysis: FrameAnalysis) -> None:
     half = _intra_glyph_half(sel)
     cx = sel["x"] + sel["w"] // 2
     cy = sel["y"] + sel["h"] // 2
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    # Antialiased to match the DC circle / angular line stroke weight (a
+    # non-AA outline renders visibly bolder than the AA circle at the same pen).
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setPen(QPen(_INTRA_COLOR, 1.2))
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawRects([QRect(int(x - h), int(y - h), int(2 * h), int(2 * h))
