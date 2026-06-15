@@ -132,6 +132,46 @@ def render_partition(painter: QPainter, analysis: FrameAnalysis, flags: dict) ->
     _draw_cu(painter, analysis)  # CU base, on top so its edges read as black
 
 
+# Block-size overlay: each coding block tinted by its size (max dimension),
+# warm (small, finely split) -> cool (large, flat). Mirrors Elecard's block-
+# size view; exact dimensions live in the hover panel. Keyed by power-of-two
+# luma size; non-listed sizes snap to the nearest key.
+_SIZE_COLORS = {
+    4:   QColor(214, 40, 40, 120),    # red
+    8:   QColor(244, 140, 40, 120),   # orange
+    16:  QColor(236, 214, 50, 120),   # yellow
+    32:  QColor(70, 196, 90, 120),    # green
+    64:  QColor(60, 140, 240, 120),   # blue
+    128: QColor(150, 80, 224, 120),   # purple
+}
+
+
+def _size_color(sz: int) -> QColor:
+    """Tint color for a block whose max dimension is `sz` px."""
+    color = _SIZE_COLORS.get(sz)
+    if color is not None:
+        return color
+    nearest = min(_SIZE_COLORS, key=lambda k: abs(k - sz))
+    return _SIZE_COLORS[nearest]
+
+
+def render_block_size(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Color each coding block by its size. Needs block data. For H.264 the
+    coding unit is the fixed 16x16 macroblock, so the map is uniform there;
+    HEVC CUs (8..64) and AV1 blocks vary and show the partition granularity."""
+    blocks = analysis.blocks
+    if blocks is None or len(blocks) == 0:
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(Qt.PenStyle.NoPen)
+    sizes = np.maximum(blocks["w"].astype(np.int32), blocks["h"].astype(np.int32))
+    for sz in np.unique(sizes):
+        color = _size_color(int(sz))
+        sel = blocks[sizes == sz]
+        for x, y, w, h in zip(sel["x"], sel["y"], sel["w"], sel["h"]):
+            painter.fillRect(int(x), int(y), int(w), int(h), color)
+
+
 def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
     """Prediction-type coloring (intra/inter/skip). Needs block data."""
     blocks = analysis.blocks
@@ -152,6 +192,7 @@ OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
     "mv": ("Motion Vectors", render_motion_vectors),
     "types": ("Block Types", render_block_types),
+    "blocksize": ("Block Size", render_block_size),
 }
 
 # Master flag: enabling partition always draws CU. PARTITION_LAYERS are the
