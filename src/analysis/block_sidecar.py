@@ -33,6 +33,7 @@ from .veye_sidecar import (
     VeyeFrameBlocks,
     blocks_from_frame,
     load_sidecar,
+    intra_modes_from_frame,
     mvs_from_frame,
     pus_from_frame,
     qp_grid_from_frame,
@@ -317,6 +318,11 @@ class BlockSidecar:
         """QP grid (int16, -1 = unknown) for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return qp_grid_from_frame(fb) if fb is not None else None
+
+    def intra_modes_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """Intra-prediction records (INTRA_DTYPE) for a frame, or None."""
+        fb = self._frame(frame_index)
+        return intra_modes_from_frame(fb) if fb is not None else None
 
     def slice_lines_for(self, frame_index: int) -> Optional[np.ndarray]:
         """HEVC slice boundary segments (N,4) for a frame, or None."""

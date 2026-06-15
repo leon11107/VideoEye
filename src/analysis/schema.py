@@ -23,6 +23,21 @@ MV_DTYPE = np.dtype([
     ("mv_y", np.float32),
 ])
 
+# Intra prediction record: one per intra-coded block. `cat` is the display
+# category (DC / planar / angular); `mode` is the codec's raw intra mode
+# (HEVC 0..34, AV1 PREDICTION_MODE) used to derive an angular direction.
+INTRA_DC = 0
+INTRA_PLANE = 1
+INTRA_ANGULAR = 2
+INTRA_DTYPE = np.dtype([
+    ("x", np.int16),
+    ("y", np.int16),
+    ("w", np.uint8),
+    ("h", np.uint8),
+    ("mode", np.int16),
+    ("cat", np.uint8),      # INTRA_DC / INTRA_PLANE / INTRA_ANGULAR
+])
+
 # Normalized coding block record (partition + prediction type).
 BLOCK_DTYPE = np.dtype([
     ("x", np.int16),
@@ -78,6 +93,10 @@ class FrameAnalysis:
     # column/row boundaries. Shape (N, 4) int32, or None.
     slice_lines: Optional[np.ndarray] = None
     tile_lines: Optional[np.ndarray] = None
+
+    # Intra prediction records (INTRA_DTYPE) for the intra-mode overlays
+    # (angular / planar / DC). None when not built or unavailable (H.264).
+    intra: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.

@@ -5,11 +5,14 @@ native-resolution frame pixmap. Adding a new overlay (e.g. a future
 codec tool like ALF) means adding one function here plus a toggle.
 """
 
+import math
+
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRect, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen
 
 from ..analysis import FrameAnalysis, PredType
+from ..analysis.schema import INTRA_DC, INTRA_PLANE, INTRA_ANGULAR
 
 QP_MAX = 63  # covers H.264/HEVC (51) and leaves headroom for AV1 mapping
 
@@ -219,12 +222,119 @@ def render_tile_boundaries(painter: QPainter, analysis: FrameAnalysis) -> None:
     _draw_lines(painter, analysis.tile_lines, QColor(40, 220, 230), 3)
 
 
+# Intra-mode overlay colors.
+_INTRA_ANGULAR_COLOR = QColor(255, 220, 40)   # yellow direction lines
+_INTRA_DC_COLOR = QColor(255, 140, 40)        # orange dot
+_INTRA_PLANE_COLOR = QColor(220, 90, 220)     # magenta square
+
+
+def _hevc_intra_dirs() -> np.ndarray:
+    """Unit direction (dx, dy) per HEVC intra mode 0..34 (0 for non-angular).
+    Modes 2..17 are horizontal, 18..34 vertical; the angle parameter sets the
+    tilt. y is screen-down."""
+    angle = {2: 32, 3: 26, 4: 21, 5: 17, 6: 13, 7: 9, 8: 5, 9: 2, 10: 0,
+             11: -2, 12: -5, 13: -9, 14: -13, 15: -17, 16: -21, 17: -26,
+             18: -32, 19: -26, 20: -21, 21: -17, 22: -13, 23: -9, 24: -5,
+             25: -2, 26: 0, 27: 2, 28: 5, 29: 9, 30: 13, 31: 17, 32: 21,
+             33: 26, 34: 32}
+    table = np.zeros((35, 2), dtype=np.float32)
+    for m, a in angle.items():
+        dx, dy = (-1.0, a / 32.0) if m < 18 else (a / 32.0, -1.0)
+        n = math.hypot(dx, dy)
+        table[m] = (dx / n, dy / n)
+    return table
+
+
+def _av1_intra_dirs() -> np.ndarray:
+    """Unit direction (dx, dy) per AV1 PREDICTION_MODE 0..12 (0 for non-angular).
+    Directional modes 1..8 map to base angles (deg); 90=up, 180=left."""
+    deg = {1: 90, 2: 180, 3: 45, 4: 135, 5: 113, 6: 157, 7: 203, 8: 67}
+    table = np.zeros((13, 2), dtype=np.float32)
+    for m, d in deg.items():
+        r = math.radians(d)
+        table[m] = (math.cos(r), -math.sin(r))
+    return table
+
+
+_HEVC_INTRA_DIRS = _hevc_intra_dirs()
+_AV1_INTRA_DIRS = _av1_intra_dirs()
+
+
+def _intra_dir_table(codec: str) -> np.ndarray:
+    if codec == "hevc":
+        return _HEVC_INTRA_DIRS
+    if codec == "av1":
+        return _AV1_INTRA_DIRS
+    return np.zeros((1, 2), dtype=np.float32)
+
+
+def render_intra_angular(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Angular intra blocks: a line through the block centre along the
+    prediction direction, with a dot at the centre."""
+    intra = analysis.intra
+    if intra is None or len(intra) == 0:
+        return
+    sel = intra[intra["cat"] == INTRA_ANGULAR]
+    if len(sel) == 0:
+        return
+    dirs = _intra_dir_table(analysis.codec)
+    modes = np.clip(sel["mode"], 0, len(dirs) - 1)
+    d = dirs[modes]
+    cx = sel["x"] + sel["w"] / 2.0
+    cy = sel["y"] + sel["h"] / 2.0
+    ln = np.minimum(sel["w"], sel["h"]) * 0.45
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(_INTRA_ANGULAR_COLOR, 1.0))
+    painter.drawLines([QLineF(float(a), float(b), float(a + dx * L),
+                              float(b + dy * L))
+                       for a, b, dx, dy, L in
+                       zip(cx, cy, d[:, 0], d[:, 1], ln)])
+    pen = QPen(_INTRA_ANGULAR_COLOR, 2.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawPoints([QPointF(float(a), float(b)) for a, b in zip(cx, cy)])
+
+
+def _intra_dots(painter, sel, color, cap) -> None:
+    if len(sel) == 0:
+        return
+    cx = sel["x"] + sel["w"] / 2.0
+    cy = sel["y"] + sel["h"] / 2.0
+    pen = QPen(color, 5.0)
+    pen.setCapStyle(cap)
+    painter.setPen(pen)
+    painter.drawPoints([QPointF(float(a), float(b)) for a, b in zip(cx, cy)])
+
+
+def render_intra_dc(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """DC intra blocks: a round dot at the block centre (no direction)."""
+    intra = analysis.intra
+    if intra is None or len(intra) == 0:
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    _intra_dots(painter, intra[intra["cat"] == INTRA_DC],
+                _INTRA_DC_COLOR, Qt.PenCapStyle.RoundCap)
+
+
+def render_intra_plane(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """Planar (and AV1 smooth/paeth) intra blocks: a square dot at the centre."""
+    intra = analysis.intra
+    if intra is None or len(intra) == 0:
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    _intra_dots(painter, intra[intra["cat"] == INTRA_PLANE],
+                _INTRA_PLANE_COLOR, Qt.PenCapStyle.SquareCap)
+
+
 # Flat overlay registry: key -> (label, render function). Each is rendered
 # independently. The partition layers are handled separately (render_partition)
 # because they compose (CU base + PU/TU refinements) rather than stack.
 OVERLAYS = {
     "qp": ("QP Map", render_qp_map),
-    "mv": ("Motion Vectors", render_motion_vectors),
+    "mv": ("Inter (MV)", render_motion_vectors),
+    "intra_angular": ("Intra Angular", render_intra_angular),
+    "intra_plane": ("Intra Plane", render_intra_plane),
+    "intra_dc": ("Intra DC", render_intra_dc),
     "types": ("Block Types", render_block_types),
     "blocksize": ("Block Size", render_block_size),
     "slice": ("Slice Boundaries", render_slice_boundaries),
@@ -259,6 +369,8 @@ def needed_layers(flags: dict) -> set:
         need.add("qp")
     if flags.get("mv"):
         need.add("mvs")
+    if flags.get("intra_angular") or flags.get("intra_plane") or flags.get("intra_dc"):
+        need.add("intra")
     if flags.get("types") or flags.get("blocksize"):
         need.add("blocks")
     if flags.get(PARTITION_KEY):

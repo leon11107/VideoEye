@@ -16,7 +16,10 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import BLOCK_DTYPE, MV_DTYPE, PredType
+from .schema import (
+    BLOCK_DTYPE, MV_DTYPE, PredType,
+    INTRA_DTYPE, INTRA_DC, INTRA_PLANE, INTRA_ANGULAR,
+)
 
 # Sidecar file header: u32 magic 'VEYE', u32 version, u32 n_frames
 _FILE_MAGIC = 0x45594556  # bytes V E Y E
@@ -722,6 +725,76 @@ def _tu_rects(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:
     out["depth"] = 0
     out["pred"] = 0
     out["mode"] = l[ys, xs]
+    return out
+
+
+def intra_modes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Intra-prediction records (INTRA_DTYPE) for the intra-mode overlays.
+    HEVC uses intra_mode (0=planar, 1=DC, 2..34=angular); AV1 uses the
+    PREDICTION_MODE (0=DC, 1..8=angular, 9..12=smooth/paeth=planar-like).
+    H.264 carries no exported intra direction, so it returns empty."""
+    if fb.codec_id == _CODEC_HEVC:
+        return _intra_from_hevc(fb)
+    if fb.codec_id == _CODEC_AV1:
+        return _intra_from_av1(fb)
+    return np.empty(0, dtype=INTRA_DTYPE)
+
+
+def _intra_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
+    if fb.cu_log2 is None or fb.pred is None or fb.intra_mode is None:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    unit = fb.block_unit
+    gh, gw = fb.cu_log2.shape
+    cl = fb.cu_log2.astype(np.int32)
+    span = np.maximum(1, (1 << cl) // unit)
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = ((mx % span) == 0) & ((my % span) == 0) & (fb.pred == PredType.INTRA)
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    modes = fb.intra_mode[ys, xs].astype(np.int16)
+    cat = np.where(modes == 0, INTRA_PLANE,
+                   np.where(modes == 1, INTRA_DC, INTRA_ANGULAR)).astype(np.uint8)
+    out = np.empty(len(xs), dtype=INTRA_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    cu_px = (1 << cl[ys, xs]).astype(np.int32)
+    out["w"] = cu_px
+    out["h"] = cu_px
+    out["mode"] = modes
+    out["cat"] = cat
+    return out
+
+
+def _intra_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
+    if fb.bsize is None or fb.pred is None or fb.mode is None:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    unit = fb.block_unit
+    gh, gw = fb.bsize.shape
+    bs = fb.bsize.astype(np.int32)
+    valid = (bs >= 0) & (bs < len(_AV1_BSIZE_WH))
+    bsc = np.where(valid, bs, 0)
+    bw = _AV1_BSIZE_W[bsc]
+    bh = _AV1_BSIZE_H[bsc]
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = (valid & (((mx * unit) % bw) == 0) & (((my * unit) % bh) == 0)
+              & (fb.pred == PredType.INTRA))
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    modes = fb.mode[ys, xs].astype(np.int16)
+    cat = np.full(len(xs), INTRA_ANGULAR, dtype=np.uint8)
+    cat[modes == 0] = INTRA_DC                      # DC_PRED
+    cat[(modes >= 9) & (modes <= 12)] = INTRA_PLANE  # SMOOTH*/PAETH
+    out = np.empty(len(xs), dtype=INTRA_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = bw[ys, xs]
+    out["h"] = bh[ys, xs]
+    out["mode"] = modes
+    out["cat"] = cat
     return out
 
 
