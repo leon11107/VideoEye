@@ -1,5 +1,33 @@
+diff --git a/aom/aomdx.h b/aom/aomdx.h
+index f18cbbfab9..5c6d2bd6ae 100644
+--- a/aom/aomdx.h
++++ b/aom/aomdx.h
+@@ -466,6 +466,13 @@ enum aom_dec_control_id {
+    * be used.
+    */
+   AV1D_GET_MI_INFO,
++
++  /*!\brief Codec control function to get the order hint of the most recently
++   * *output* frame (the one returned by the last aom_codec_get_frame), as
++   * opposed to AOMD_GET_ORDER_HINT which returns the most recently *decoded*
++   * frame. unsigned int* parameter. (VideoEye extension.)
++   */
++  AOMD_GET_LAST_SHOW_ORDER_HINT,
+ };
+ 
+ /*!\cond */
+@@ -595,6 +602,9 @@ AOM_CTRL_USE_TYPE(AOMD_GET_BASE_Q_IDX, int *)
+ AOM_CTRL_USE_TYPE(AOMD_GET_ORDER_HINT, unsigned int *)
+ #define AOM_CTRL_AOMD_GET_ORDER_HINT
+ 
++AOM_CTRL_USE_TYPE(AOMD_GET_LAST_SHOW_ORDER_HINT, unsigned int *)
++#define AOM_CTRL_AOMD_GET_LAST_SHOW_ORDER_HINT
++
+ // The AOM_CTRL_USE_TYPE macro can't be used with AV1D_GET_MI_INFO because
+ // AV1D_GET_MI_INFO takes more than one parameter.
+ #define AOM_CTRL_AV1D_GET_MI_INFO
 diff --git a/av1/av1_dx_iface.c b/av1/av1_dx_iface.c
-index 77769bd1d5..059df6ffa6 100644
+index 77769bd1d5..4449c88dd9 100644
 --- a/av1/av1_dx_iface.c
 +++ b/av1/av1_dx_iface.c
 @@ -548,6 +548,14 @@ static aom_codec_err_t decode_one(aom_codec_alg_priv_t *ctx,
@@ -17,3 +45,68 @@ index 77769bd1d5..059df6ffa6 100644
    worker->had_error = 0;
    winterface->execute(worker);
  
+@@ -1498,6 +1506,17 @@ static aom_codec_err_t ctrl_get_order_hint(aom_codec_alg_priv_t *ctx,
+   return AOM_CODEC_OK;
+ }
+ 
++// VideoEye: order hint of the most recently OUTPUT frame (set in
++// decoder_get_frame), not the most recently decoded one.
++static aom_codec_err_t ctrl_get_last_show_order_hint(aom_codec_alg_priv_t *ctx,
++                                                     va_list args) {
++  unsigned int *const arg = va_arg(args, unsigned int *);
++  if (arg == NULL) return AOM_CODEC_INVALID_PARAM;
++  if (ctx->last_show_frame == NULL) return AOM_CODEC_ERROR;
++  *arg = ctx->last_show_frame->order_hint;
++  return AOM_CODEC_OK;
++}
++
+ static aom_codec_err_t ctrl_get_mi_info(aom_codec_alg_priv_t *ctx,
+                                         va_list args) {
+   int mi_row = va_arg(args, int);
+@@ -1714,6 +1733,7 @@ static aom_codec_ctrl_fn_map_t decoder_ctrl_maps[] = {
+   { AOMD_GET_SHOW_FRAME_FLAG, ctrl_get_show_frame_flag },
+   { AOMD_GET_BASE_Q_IDX, ctrl_get_base_q_idx },
+   { AOMD_GET_ORDER_HINT, ctrl_get_order_hint },
++  { AOMD_GET_LAST_SHOW_ORDER_HINT, ctrl_get_last_show_order_hint },
+   { AV1D_GET_MI_INFO, ctrl_get_mi_info },
+   CTRL_MAP_END,
+ };
+diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
+index f84ed17d20..7e48e9c985 100644
+--- a/av1/decoder/inspection.c
++++ b/av1/decoder/inspection.c
+@@ -64,6 +64,16 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+   fd->tile_mi_rows = tile_info.mi_row_end - tile_info.mi_row_start;
+   fd->delta_q_present_flag = cm->delta_q_info.delta_q_present_flag;
+   fd->delta_q_res = cm->delta_q_info.delta_q_res;
++  // VideoEye: capture this frame's order hint and that of each reference slot
++  // so the consumer can draw frame-chart reference markers. order_hint is the
++  // bitstream-coded order hint (the decoder does not compute display_order_hint,
++  // which is encoder-only); it is monotonic within a GOP and may wrap modulo
++  // 2^order_hint_bits, which the consumer resolves by nearest frame index.
++  fd->order_hint = (int)cm->current_frame.order_hint;
++  for (int r = 0; r < INTER_REFS_PER_FRAME; r++) {
++    const RefCntBuffer *ref_buf = get_ref_frame_buf(cm, LAST_FRAME + r);
++    fd->ref_frame_order_hint[r] = ref_buf ? (int)ref_buf->order_hint : -1;
++  }
+ #if CONFIG_ACCOUNTING
+   fd->accounting = &pbi->accounting;
+ #endif
+diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
+index 7d1c14db2a..75fa4dca64 100644
+--- a/av1/decoder/inspection.h
++++ b/av1/decoder/inspection.h
+@@ -79,6 +79,13 @@ struct insp_frame_data {
+   int delta_q_present_flag;
+   int delta_q_res;
+   int show_existing_frame;
++  // VideoEye: frame reference relationships (display order). order_hint is this
++  // frame's display order; ref_frame_order_hint[r] is the display order of the
++  // frame in reference slot LAST_FRAME+r (-1 if that slot is unused). 7 ==
++  // INTER_REFS_PER_FRAME (kept as a literal so this header needs no extra
++  // includes; the value is fixed by the AV1 spec).
++  int order_hint;
++  int ref_frame_order_hint[7];
+ };
+ 
+ void ifd_init(insp_frame_data *fd, int frame_width, int frame_height);

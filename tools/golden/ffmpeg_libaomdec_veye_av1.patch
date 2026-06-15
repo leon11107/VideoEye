@@ -1,33 +1,71 @@
 diff --git a/libavcodec/libaomdec.c b/libavcodec/libaomdec.c
-index 69eec8b..d644b38 100644
+index 69eec8b..d8fcab5 100644
 --- a/libavcodec/libaomdec.c
 +++ b/libavcodec/libaomdec.c
-@@ -35,11 +35,24 @@
+@@ -29,17 +29,62 @@
+ #include "libavutil/common.h"
+ #include "libavutil/cpu.h"
+ #include "libavutil/imgutils.h"
++#include "libavutil/mem.h"
+ 
+ #include "avcodec.h"
+ #include "codec_internal.h"
  #include "decode.h"
  #include "libaom.h"
  #include "profiles.h"
 +#include "veye_blockinfo.h"
 +#include "veye_aom_inspect.h"
++
++/* VideoEye: a small pool of serialized per-frame block grids, keyed by order
++ * hint. An AV1 Temporal Unit can decode several frames (e.g. an ALTREF plus the
++ * shown frame) in one aom_codec_decode(), and frames are output in display
++ * order which differs from decode order -- so the single most-recent inspection
++ * cannot be attached blindly to whatever aom_codec_get_frame() returns. We
++ * serialize every decoded frame here, then attach the one whose order hint
++ * matches the output frame (AOMD_GET_LAST_SHOW_ORDER_HINT). 16 covers the
++ * reorder depth of any real GOP. */
++#define VEYE_POOL_SIZE 16
++
++typedef struct VeyeInspSlot {
++    int valid;
++    unsigned int order_hint;
++    uint8_t *buf;   ///< serialized side-data payload (av_malloc'd)
++    size_t size;
++} VeyeInspSlot;
  
  typedef struct AV1DecodeContext {
      struct aom_codec_ctx decoder;
-+    veye_insp_frame_data insp;  ///< VideoEye: per-frame bitstream inspection
++    veye_insp_frame_data insp;  ///< VideoEye: scratch for the inspection callback
 +    int insp_ready;             ///< inspection callback registered
++    VeyeInspSlot insp_pool[VEYE_POOL_SIZE];  ///< decoded-frame grids by order hint
  } AV1DecodeContext;
  
 +/* VideoEye: libaom invokes this once per decoded frame during
-+ * aom_codec_decode(); it refreshes ctx->insp so the decode loop can serialize
-+ * the block grid after the frame buffer is allocated. */
++ * aom_codec_decode(). We serialize the block grid immediately and stash it
++ * keyed by this frame's order hint, so it survives until the frame is output
++ * (which may be several get_frame calls later, in display order). */
 +static void veye_inspect_cb(void *pbi, void *data)
 +{
 +    AV1DecodeContext *ctx = (AV1DecodeContext *)data;
++    uint8_t *buf = NULL;
++    size_t size = 0;
++
 +    ifd_inspect(&ctx->insp, pbi, 0);
++    if (ff_veye_serialize_blockinfo_av1(&ctx->insp, &buf, &size) == 0 && buf) {
++        VeyeInspSlot *s =
++            &ctx->insp_pool[(unsigned)ctx->insp.order_hint % VEYE_POOL_SIZE];
++        av_free(s->buf);
++        s->buf = buf;
++        s->size = size;
++        s->order_hint = (unsigned int)ctx->insp.order_hint;
++        s->valid = 1;
++    }
 +}
 +
  static av_cold int aom_init(AVCodecContext *avctx,
                              const struct aom_codec_iface *iface)
  {
-@@ -58,6 +71,25 @@ static av_cold int aom_init(AVCodecContext *avctx,
+@@ -58,6 +103,25 @@ static av_cold int aom_init(AVCodecContext *avctx,
          return AVERROR(EINVAL);
      }
  
@@ -53,362 +91,42 @@ index 69eec8b..d644b38 100644
      return 0;
  }
  
-@@ -180,6 +212,12 @@ static int aom_decode(AVCodecContext *avctx, AVFrame *picture,
+@@ -180,6 +244,26 @@ static int aom_decode(AVCodecContext *avctx, AVFrame *picture,
          if ((ret = ff_get_buffer(avctx, picture, 0)) < 0)
              return ret;
  
-+        /* VideoEye: attach the block grid the inspection callback gathered for
-+         * the frame we just pulled. show_existing_frame repeats a previously
-+         * decoded frame and carries no fresh inspection data, so skip it. */
-+        if (ctx->insp_ready && !ctx->insp.show_existing_frame)
-+            ff_veye_export_blockinfo_av1(picture, &ctx->insp);
++        /* VideoEye: attach the block grid for the frame we just pulled. The
++         * output frame (display order) may differ from the last decoded frame,
++         * so match by the output frame's order hint against the per-frame pool
++         * filled by the inspection callback. Fall back to the most-recent
++         * inspection only if the lookup fails. */
++        if (ctx->insp_ready) {
++            unsigned int out_oh;
++            int attached = 0;
++            if (aom_codec_control(&ctx->decoder, AOMD_GET_LAST_SHOW_ORDER_HINT,
++                                  &out_oh) == AOM_CODEC_OK) {
++                VeyeInspSlot *s = &ctx->insp_pool[out_oh % VEYE_POOL_SIZE];
++                if (s->valid && s->order_hint == out_oh) {
++                    ff_veye_attach_blockinfo(picture, s->buf, s->size);
++                    attached = 1;
++                }
++            }
++            if (!attached && !ctx->insp.show_existing_frame)
++                ff_veye_export_blockinfo_av1(picture, &ctx->insp);
++        }
 +
  #ifdef AOM_CTRL_AOMD_GET_FRAME_FLAGS
          {
              aom_codec_frame_flags_t flags;
-@@ -224,6 +262,7 @@ static av_cold int aom_free(AVCodecContext *avctx)
+@@ -223,7 +307,11 @@ static int aom_decode(AVCodecContext *avctx, AVFrame *picture,
+ static av_cold int aom_free(AVCodecContext *avctx)
  {
      AV1DecodeContext *ctx = avctx->priv_data;
++    int i;
      aom_codec_destroy(&ctx->decoder);
 +    ifd_clear(&ctx->insp);
++    for (i = 0; i < VEYE_POOL_SIZE; i++)
++        av_freep(&ctx->insp_pool[i].buf);
      return 0;
  }
  
-diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..773a0e8 100644
---- a/libavcodec/veye_blockinfo.c
-+++ b/libavcodec/veye_blockinfo.c
-@@ -8,7 +8,10 @@
- #include "libavutil/error.h"
- #include "libavutil/frame.h"
- 
-+#include "libavcodec/codec_id.h"
-+
- #include "veye_blockinfo.h"
-+#include "veye_aom_inspect.h"
- 
- int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
-                              const uint32_t *mb_type, const int8_t *qscale,
-@@ -113,8 +116,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
-                                   const int8_t  *qp_y_tab,
-                                   const uint8_t *tab_ipm,
-                                   const uint8_t *is_pcm,
--                                  const int8_t  *mvf_pred_flag,
-+                                  const void   *tab_mvf,
-                                   size_t mvf_elem_size,
-+                                  const VeyeMvFieldLayout *mvf_layout,
-                                   int min_cb_width, int min_cb_height,
-                                   int min_pu_width,
-                                   int log2_min_cb_size, int log2_ctb_size,
-@@ -142,28 +146,111 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
-             int y_pu  = y << cb_to_pu;
-             int pu    = x_pu + y_pu * min_pu_width;
-             int cu_log2 = log2_ctb_size - depth;
-+            const char *mvf = NULL;
-+            int8_t pf = 0;
-             int pred;
- 
-             if (cu_log2 < log2_min_cb_size) cu_log2 = log2_min_cb_size;
-             if (cu_log2 > log2_ctb_size)    cu_log2 = log2_ctb_size;
- 
-+            if (tab_mvf && mvf_layout) {
-+                mvf = (const char *)tab_mvf + (size_t)pu * mvf_elem_size;
-+                pf  = *(const int8_t *)(mvf + mvf_layout->flag_off);
-+            }
-+
-             if (is_pcm && is_pcm[pu]) {
-                 pred = VEYE_PRED_IPCM;
-             } else if (skip_flag && skip_flag[cb]) {
-                 pred = VEYE_PRED_SKIP;
-             } else {
--                int8_t pf = mvf_pred_flag
--                    ? *(const int8_t *)((const char *)mvf_pred_flag
--                                        + (size_t)pu * mvf_elem_size)
--                    : 0;
-                 pred = (pf == 0) ? VEYE_PRED_INTRA : VEYE_PRED_INTER;
-             }
- 
-             rec->cu_log2    = (uint8_t)cu_log2;
-             rec->pred       = (uint8_t)pred;
-             rec->intra_mode = tab_ipm ? tab_ipm[pu] : 0;
--            rec->reserved   = 0;
-+            rec->pred_flag  = (uint8_t)pf;
-             rec->qp         = qp_y_tab ? qp_y_tab[cb] : -1;
-+
-+            rec->mv0_x = rec->mv0_y = rec->mv1_x = rec->mv1_y = 0;
-+            rec->ref0  = rec->ref1  = -1;
-+            if (mvf) {
-+                const int8_t *ref = (const int8_t *)(mvf + mvf_layout->ref_off);
-+                if (pf & 1) {  /* PF_L0 */
-+                    const int16_t *m =
-+                        (const int16_t *)(mvf + mvf_layout->mv0_off);
-+                    rec->mv0_x = m[0];
-+                    rec->mv0_y = m[1];
-+                    rec->ref0  = ref[0];
-+                }
-+                if (pf & 2) {  /* PF_L1 */
-+                    const int16_t *m =
-+                        (const int16_t *)(mvf + mvf_layout->mv1_off);
-+                    rec->mv1_x = m[0];
-+                    rec->mv1_y = m[1];
-+                    rec->ref1  = ref[1];
-+                }
-+            }
-+            rec->reserved[0] = rec->reserved[1] = 0;
-+            rec++;
-+        }
-+    }
-+
-+    return 0;
-+}
-+
-+/* libaom: ref_frame[0] == INTRA_FRAME (0) marks an intra block; >= 1 is inter.
-+ * NONE_FRAME is -1. */
-+#define VEYE_AV1_INTRA_FRAME 0
-+
-+int ff_veye_export_blockinfo_av1(AVFrame *frame,
-+                                 const struct veye_insp_frame_data *fd)
-+{
-+    VeyeBlockInfoHeader *hdr;
-+    VeyeBlockRecordAV1 *rec;
-+    AVFrameSideData *sd;
-+    size_t n, size;
-+    int x, y;
-+
-+    if (!frame || !fd || !fd->mi_grid || fd->mi_cols <= 0 || fd->mi_rows <= 0)
-+        return 0;
-+
-+    n    = (size_t)fd->mi_cols * (size_t)fd->mi_rows;
-+    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecordAV1);
-+
-+    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO, size);
-+    if (!sd)
-+        return AVERROR(ENOMEM);
-+
-+    hdr = (VeyeBlockInfoHeader *)sd->data;
-+    hdr->magic       = VEYE_BI_MAGIC;
-+    hdr->version     = VEYE_BI_VERSION;
-+    hdr->record_size = (uint16_t)sizeof(VeyeBlockRecordAV1);
-+    hdr->codec_id    = (uint32_t)AV_CODEC_ID_AV1;
-+    hdr->grid_w      = (uint32_t)fd->mi_cols;
-+    hdr->grid_h      = (uint32_t)fd->mi_rows;
-+    hdr->block_unit  = 4;  /* MI_SIZE: each cell is a 4x4 luma block */
-+    hdr->n_records   = (uint32_t)n;
-+
-+    rec = (VeyeBlockRecordAV1 *)(sd->data + sizeof(VeyeBlockInfoHeader));
-+    for (y = 0; y < fd->mi_rows; y++) {
-+        for (x = 0; x < fd->mi_cols; x++) {
-+            const veye_insp_mi_data *mi = &fd->mi_grid[y * fd->mi_cols + x];
-+            int inter = mi->ref_frame[0] > VEYE_AV1_INTRA_FRAME;
-+
-+            rec->bsize   = (uint8_t)mi->bsize;
-+            rec->pred    = (uint8_t)(inter ? VEYE_PRED_INTER : VEYE_PRED_INTRA);
-+            rec->mode    = (uint8_t)mi->mode;
-+            rec->skip    = (uint8_t)mi->skip;
-+            rec->qp      = mi->current_qindex;
-+            rec->mv0_x   = mi->mv[0].col;
-+            rec->mv0_y   = mi->mv[0].row;
-+            rec->mv1_x   = mi->mv[1].col;
-+            rec->mv1_y   = mi->mv[1].row;
-+            rec->ref0    = (int8_t)mi->ref_frame[0];
-+            rec->ref1    = (int8_t)mi->ref_frame[1];
-+            rec->tx_size = (uint8_t)mi->tx_size;
-+            rec->reserved = 0;
-             rec++;
-         }
-     }
-diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..68be480 100644
---- a/libavcodec/veye_blockinfo.h
-+++ b/libavcodec/veye_blockinfo.h
-@@ -21,7 +21,7 @@
- 
- /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
- #define VEYE_BI_MAGIC   0x4B424556u
--#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 2
- 
- typedef struct VeyeBlockInfoHeader {
-     uint32_t magic;       ///< VEYE_BI_MAGIC
-@@ -39,6 +39,40 @@ typedef struct VeyeBlockRecord {
-     int32_t  qp;          ///< quantizer for the cell, or -1 if unknown
- } VeyeBlockRecord;
- 
-+/*
-+ * AV1 cells are emitted at min mode-info (4x4) granularity. A coding block
-+ * spans a variable number of these cells per its bsize; the consumer collapses
-+ * equal-block cells the way HEVC collapses by cu_log2. Dispatched on
-+ * codec_id == AV1. QP carries libaom's per-block current_qindex (0..255);
-+ * motion vectors are in 1/8-pel luma units (col=x, row=y).
-+ */
-+typedef struct VeyeBlockRecordAV1 {
-+    uint8_t  bsize;       ///< libaom BLOCK_SIZE enum (0..BLOCK_SIZES_ALL-1)
-+    uint8_t  pred;        ///< PredType: 1 intra, 2 inter (AV1 has no skip/pcm class)
-+    uint8_t  mode;        ///< libaom PREDICTION_MODE
-+    uint8_t  skip;        ///< skip_txfm flag (no residual)
-+    int32_t  qp;          ///< current_qindex for the block (0..255)
-+    int16_t  mv0_x;       ///< L0 motion vector, 1/8-pel luma
-+    int16_t  mv0_y;
-+    int16_t  mv1_x;       ///< L1 motion vector, 1/8-pel luma (compound only)
-+    int16_t  mv1_y;
-+    int8_t   ref0;        ///< ref_frame[0] (0=INTRA, 1..7 inter, -1 none)
-+    int8_t   ref1;        ///< ref_frame[1] (-1 if single-reference)
-+    uint8_t  tx_size;     ///< libaom TX_SIZE
-+    uint8_t  reserved;
-+} VeyeBlockRecordAV1;
-+
-+struct veye_insp_frame_data;
-+
-+/**
-+ * Serialize a libaom inspection frame (4x4 MI grid) into
-+ * AV_FRAME_DATA_VEYE_BLOCKINFO and attach it to @p frame. @p fd must already
-+ * have been filled by ifd_inspect(). Returns 0 on success/skip,
-+ * AVERROR(ENOMEM) on allocation failure.
-+ */
-+int ff_veye_export_blockinfo_av1(AVFrame *frame,
-+                                 const struct veye_insp_frame_data *fd);
-+
- /*
-  * HEVC cells are emitted at min-CB (typically 8x8) granularity. Unlike the
-  * fixed-size H.264 macroblock, an HEVC coding unit spans a variable number
-@@ -49,8 +83,15 @@ typedef struct VeyeBlockRecordHEVC {
-     uint8_t  cu_log2;     ///< log2 of the luma CU size in pixels (3..6)
-     uint8_t  pred;        ///< PredType: 1 intra, 2 inter, 3 skip, 4 pcm
-     uint8_t  intra_mode;  ///< luma intra prediction mode 0..34 (intra only)
--    uint8_t  reserved;
-+    uint8_t  pred_flag;   ///< HEVC PredFlag: 0 intra, 1 L0, 2 L1, 3 BI
-     int32_t  qp;          ///< luma QP for the cell
-+    int16_t  mv0_x;       ///< L0 motion vector, 1/4-pel luma (valid if PF_L0)
-+    int16_t  mv0_y;
-+    int16_t  mv1_x;       ///< L1 motion vector, 1/4-pel luma (valid if PF_L1)
-+    int16_t  mv1_y;
-+    int8_t   ref0;        ///< L0 reference index, -1 if unused
-+    int8_t   ref1;        ///< L1 reference index, -1 if unused
-+    uint8_t  reserved[2];
- } VeyeBlockRecordHEVC;
- 
- /**
-@@ -83,23 +124,33 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
-  * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
-  * one is already attached, otherwise allocates a fresh one.
-  *
-- * @p mvf_pred_flag points at the pred_flag field of the frame's first
-- * MvField; @p mvf_elem_size is sizeof(MvField), so the field is sampled
-- * without this module depending on the HEVC struct layout. pred_flag == 0
-- * (PF_INTRA) marks an intra block.
-+ * @p tab_mvf points at the frame's MvField array (one per min-PU); each
-+ * record carries mv[2], ref_idx[2] and pred_flag. @p mvf_field_off gives the
-+ * byte offsets of those members and @p mvf_elem_size is sizeof(MvField), so
-+ * the motion field is read without this module depending on the HEVC struct
-+ * layout. pred_flag == 0 (PF_INTRA) marks an intra block. Each min-CB samples
-+ * the MvField of its top-left min-PU.
-  *
-  * All min-CB tables (skip_flag, tab_ct_depth, qp_y_tab) are strided by
-  * @p min_cb_width; the min-PU tables (tab_ipm, is_pcm, MvField) by
-  * @p min_pu_width. Returns 0 on success/skip, AVERROR(ENOMEM) on failure.
-  */
-+typedef struct VeyeMvFieldLayout {
-+    size_t mv0_off;   ///< offsetof(MvField, mv[0])  (Mv = {int16 x, int16 y})
-+    size_t mv1_off;   ///< offsetof(MvField, mv[1])
-+    size_t ref_off;   ///< offsetof(MvField, ref_idx) (int8_t[2])
-+    size_t flag_off;  ///< offsetof(MvField, pred_flag) (int8_t)
-+} VeyeMvFieldLayout;
-+
- int ff_veye_export_blockinfo_hevc(AVFrame *frame,
-                                   const uint8_t *skip_flag,
-                                   const uint8_t *tab_ct_depth,
-                                   const int8_t  *qp_y_tab,
-                                   const uint8_t *tab_ipm,
-                                   const uint8_t *is_pcm,
--                                  const int8_t  *mvf_pred_flag,
-+                                  const void   *tab_mvf,
-                                   size_t mvf_elem_size,
-+                                  const VeyeMvFieldLayout *mvf_layout,
-                                   int min_cb_width, int min_cb_height,
-                                   int min_pu_width,
-                                   int log2_min_cb_size, int log2_ctb_size,
-diff --git a/libavcodec/veye_aom_inspect.h b/libavcodec/veye_aom_inspect.h
-new file mode 100644
-index 0000000..03673d4
---- /dev/null
-+++ b/libavcodec/veye_aom_inspect.h
-@@ -0,0 +1,79 @@
-+/*
-+ * VideoEye: layout mirror of libaom's bitstream-inspection structs.
-+ *
-+ * These mirror av1/decoder/inspection.h from the libaom that this FFmpeg is
-+ * linked against. ifd_inspect() writes into a frame_data by the *real* struct
-+ * layout, so this copy must stay byte-identical to it. It is valid only for a
-+ * libaom built with CONFIG_INSPECTION=1 and CONFIG_ACCOUNTING=0 (the VideoEye
-+ * build): with accounting on, the real insp_frame_data gains a leading
-+ * Accounting* member and the layouts diverge.
-+ *
-+ * The structs are copied (rather than including the internal header) so this
-+ * file does not drag in libaom's internal header web; only ifd_init/inspect/
-+ * clear are referenced, which libaom.a exports.
-+ */
-+
-+#ifndef AVCODEC_VEYE_AOM_INSPECT_H
-+#define AVCODEC_VEYE_AOM_INSPECT_H
-+
-+#include <stdint.h>
-+
-+#define VEYE_AOM_MAX_SEGMENTS 8  /* MAX_SEGMENTS in av1/common/seg_common.h */
-+
-+typedef struct veye_insp_mv {
-+    int16_t row;
-+    int16_t col;
-+} veye_insp_mv;
-+
-+typedef struct veye_insp_mi_data {
-+    veye_insp_mv mv[2];
-+    int16_t ref_frame[2];
-+    int16_t mode;
-+    int16_t uv_mode;
-+    int16_t bsize;
-+    int16_t skip;
-+    int16_t segment_id;
-+    int16_t dual_filter_type;
-+    int16_t filter[2];
-+    int16_t tx_type;
-+    int16_t tx_size;
-+    int16_t cdef_level;
-+    int16_t cdef_strength;
-+    int16_t cfl_alpha_idx;
-+    int16_t cfl_alpha_sign;
-+    int16_t current_qindex;
-+    int16_t compound_type;
-+    int16_t motion_mode;
-+    int16_t intrabc;
-+    int16_t palette;
-+    int16_t uv_palette;
-+} veye_insp_mi_data;
-+
-+typedef struct veye_insp_frame_data {
-+    veye_insp_mi_data *mi_grid;
-+    int16_t frame_number;
-+    int show_frame;
-+    int frame_type;
-+    int base_qindex;
-+    int mi_rows;
-+    int mi_cols;
-+    int tile_mi_rows;
-+    int tile_mi_cols;
-+    int16_t y_dequant[VEYE_AOM_MAX_SEGMENTS][2];
-+    int16_t u_dequant[VEYE_AOM_MAX_SEGMENTS][2];
-+    int16_t v_dequant[VEYE_AOM_MAX_SEGMENTS][2];
-+    int delta_q_present_flag;
-+    int delta_q_res;
-+    int show_existing_frame;
-+} veye_insp_frame_data;
-+
-+/* Exported by libaom.a (CONFIG_INSPECTION=1). The real prototypes use
-+ * insp_frame_data*; the linker matches on symbol name, and the layout above
-+ * is identical, so the veye_-prefixed pointer types are ABI-compatible. */
-+extern void ifd_init(veye_insp_frame_data *fd, int frame_width,
-+                     int frame_height);
-+extern void ifd_clear(veye_insp_frame_data *fd);
-+extern int  ifd_inspect(veye_insp_frame_data *fd, void *decoder,
-+                        int skip_not_transform);
-+
-+#endif /* AVCODEC_VEYE_AOM_INSPECT_H */
