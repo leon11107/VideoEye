@@ -152,14 +152,19 @@ def _fill_rects(painter: QPainter, sel, color: QColor) -> None:
 
 
 def _bitsize_heatmap(painter: QPainter, sel, values) -> None:
-    """Opaque grayscale heatmap of a per-CU bit metric, normalized to the
-    frame's peak (bright = more bits, Elecard-style)."""
+    """Opaque grayscale heatmap of a bit metric as bit *density* (bits per
+    pixel), normalized to the frame's peak (bright = denser coding,
+    Elecard-style). Dividing by block area makes the colour reflect how
+    expensive a region is per unit area instead of just tracking block size."""
     if len(sel) == 0:
         return
-    maxv = float(values.max())
+    area = np.maximum(sel["w"].astype(np.float32) * sel["h"].astype(np.float32),
+                      1.0)
+    dens = values.astype(np.float32) / area        # bits per pixel
+    maxv = float(dens.max())
     if maxv <= 0:
         return
-    gray = np.clip(values.astype(np.float32) * (255.0 / maxv), 0, 255)
+    gray = np.clip(dens * (255.0 / maxv), 0, 255)
     gq = (gray.astype(np.int32) // 8) * 8       # quantize to limit fill groups
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(Qt.PenStyle.NoPen)
