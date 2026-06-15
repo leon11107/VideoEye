@@ -42,7 +42,7 @@ _REC_HEVC = np.dtype([
     ("cu_log2", "u1"), ("pred", "u1"), ("intra_mode", "u1"),
     ("pred_flag", "u1"), ("qp", "<i4"),
     ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
-    ("ref0", "i1"), ("ref1", "i1"), ("part_mode", "u1"), ("reserved", "u1"),
+    ("ref0", "i1"), ("ref1", "i1"), ("part_mode", "u1"), ("ct_depth", "u1"),
 ])
 
 # VeyeBlockRecordAV1 (sidecar v2): u8 bsize, pred, mode, skip, i32 qp,
@@ -114,6 +114,7 @@ class VeyeFrameBlocks:
     intra_mode: Optional[np.ndarray] = None  # HEVC: luma intra mode 0..34
     pred_flag: Optional[np.ndarray] = None  # HEVC: PredFlag (0/1/2/3 = I/L0/L1/BI)
     part_mode: Optional[np.ndarray] = None  # HEVC: PartMode per cell (0..7)
+    ct_depth: Optional[np.ndarray] = None   # HEVC: CU coding-tree depth (0=CTB)
     tu_log2: Optional[np.ndarray] = None    # HEVC: luma TU log2 per min-TB (0=none)
     tu_unit: int = 0                        # HEVC: pixels per min-TB cell
     own_poc: Optional[int] = None           # HEVC: this frame's POC (v5)
@@ -282,6 +283,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             intra_mode=recs["intra_mode"].reshape(grid_h, grid_w).copy(),
             pred_flag=recs["pred_flag"].reshape(grid_h, grid_w).copy(),
             part_mode=recs["part_mode"].reshape(grid_h, grid_w).copy(),
+            ct_depth=recs["ct_depth"].reshape(grid_h, grid_w).copy(),
             tu_log2=tu_log2, tu_unit=tu_unit,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
             mv=mv, ref_idx=ref,
@@ -387,6 +389,7 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     cu_log2 = fb.cu_log2
     pred = fb.pred
     pf = fb.pred_flag
+    ctd = fb.ct_depth
     out: list[tuple] = []
     for my in range(fb.grid_h):
         py = my * unit
@@ -399,7 +402,8 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
             p = int(pred[my, mx])
             if p == PredType.INTER and pf is not None and int(pf[my, mx]) == 3:
                 p = PredType.BI  # PredFlag 3 = bi-prediction
-            out.append((px, py, cu_px, cu_px, 0, p, cl))
+            depth = int(ctd[my, mx]) if ctd is not None else 0
+            out.append((px, py, cu_px, cu_px, depth, p, cl))
     return _pack(out, BLOCK_DTYPE)
 
 
