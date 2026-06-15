@@ -86,13 +86,16 @@ def render_motion_vectors(painter: QPainter, analysis: FrameAnalysis) -> None:
 
 
 def _draw_rects(painter: QPainter, rects, color: QColor) -> None:
-    """Outline each (x, y, w, h) rectangle in a structured array."""
+    """Outline each (x, y, w, h) rectangle in a structured array. Batched into a
+    single drawRects() call -- per-rect drawRect() looped ~80 ms/frame for the
+    ~18k partition rectangles of a 1440p frame."""
     if rects is None or len(rects) == 0:
         return
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     painter.setPen(QPen(color, 1.0))
-    for x, y, w, h in zip(rects["x"], rects["y"], rects["w"], rects["h"]):
-        painter.drawRect(int(x), int(y), int(w), int(h))
+    painter.drawRects([QRect(int(x), int(y), int(w), int(h))
+                       for x, y, w, h in zip(rects["x"], rects["y"],
+                                             rects["w"], rects["h"])])
 
 
 def _draw_cu(painter: QPainter, analysis: FrameAnalysis) -> None:

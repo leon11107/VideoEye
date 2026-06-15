@@ -449,25 +449,37 @@ def _blocks_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
     cu_log2 for labeling.
     """
     unit = fb.block_unit
-    cu_log2 = fb.cu_log2
-    pred = fb.pred
+    gh, gw = fb.cu_log2.shape
+    cl = fb.cu_log2.astype(np.int32)
+    pred = fb.pred.astype(np.int32)
     pf = fb.pred_flag
-    ctd = fb.ct_depth
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            cl = int(cu_log2[my, mx])
-            cu_px = 1 << cl
-            px = mx * unit
-            if px % cu_px or py % cu_px:
-                continue  # not the top-left cell of this CU
-            p = int(pred[my, mx])
-            if p == PredType.INTER and pf is not None and int(pf[my, mx]) == 3:
-                p = PredType.BI  # PredFlag 3 = bi-prediction
-            depth = int(ctd[my, mx]) if ctd is not None else 0
-            out.append((px, py, cu_px, cu_px, depth, p, cl))
-    return _pack(out, BLOCK_DTYPE)
+
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    span = np.maximum(1, (1 << cl) // unit)               # min-CB cells per CU
+    origin = ((mx % span) == 0) & ((my % span) == 0)      # CU top-left cells
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+
+    clv = cl[ys, xs]
+    cu_px = (1 << clv).astype(np.int32)
+    p = pred[ys, xs].copy()
+    if pf is not None:
+        bi = (p == PredType.INTER) & (pf[ys, xs] == 3)    # PredFlag 3 = bi-pred
+        p[bi] = PredType.BI
+    depth = (fb.ct_depth[ys, xs] if fb.ct_depth is not None
+             else np.zeros(len(xs), dtype=np.int32))
+
+    out = np.empty(len(xs), dtype=BLOCK_DTYPE)
+    out["x"] = xs * unit
+    out["y"] = ys * unit
+    out["w"] = cu_px
+    out["h"] = cu_px
+    out["depth"] = depth
+    out["pred"] = p
+    out["mode"] = clv
+    return out
 
 
 def _blocks_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:
@@ -552,24 +564,45 @@ def pus_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     if fb.cu_log2 is None or fb.part_mode is None:
         return np.empty(0, dtype=BLOCK_DTYPE)
     unit = fb.block_unit
-    cu_log2 = fb.cu_log2
+    gh, gw = fb.cu_log2.shape
+    cl = fb.cu_log2.astype(np.int32)
     pm = fb.part_mode
     pred = fb.pred
-    out: list[tuple] = []
-    for my in range(fb.grid_h):
-        py = my * unit
-        for mx in range(fb.grid_w):
-            cl = int(cu_log2[my, mx])
-            cu_px = 1 << cl
-            px = mx * unit
-            if px % cu_px or py % cu_px:
-                continue  # not the CU's top-left cell
-            mode = int(pm[my, mx])
-            p = int(pred[my, mx]) if pred is not None else 0
-            for fx, fy, fw, fh in _PART_PUS.get(mode, _PART_PUS[0]):
-                out.append((px + int(fx * cu_px), py + int(fy * cu_px),
-                            int(fw * cu_px), int(fh * cu_px), 0, p, mode))
-    return _pack(out, BLOCK_DTYPE)
+
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    span = np.maximum(1, (1 << cl) // unit)
+    origin = ((mx % span) == 0) & ((my % span) == 0)      # CU top-left cells
+    ys, xs = np.nonzero(origin)
+    if len(xs) == 0:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+
+    cu_px = (1 << cl[ys, xs]).astype(np.int32)
+    px = xs * unit
+    py = ys * unit
+    modes = pm[ys, xs].astype(np.int32)
+    preds = (pred[ys, xs].astype(np.int32) if pred is not None
+             else np.zeros(len(xs), dtype=np.int32))
+
+    parts = []
+    for mode, fracs in _PART_PUS.items():
+        sel = modes == mode
+        if not sel.any():
+            continue
+        spx, spy, scu, sp = px[sel], py[sel], cu_px[sel], preds[sel]
+        for fx, fy, fw, fh in fracs:
+            rec = np.empty(len(spx), dtype=BLOCK_DTYPE)
+            rec["x"] = spx + (fx * scu).astype(np.int32)
+            rec["y"] = spy + (fy * scu).astype(np.int32)
+            rec["w"] = (fw * scu).astype(np.int32)
+            rec["h"] = (fh * scu).astype(np.int32)
+            rec["depth"] = 0
+            rec["pred"] = sp
+            rec["mode"] = mode
+            parts.append(rec)
+    if not parts:
+        return np.empty(0, dtype=BLOCK_DTYPE)
+    return np.concatenate(parts)
 
 
 def _tu_rects(fb: VeyeFrameBlocks, chroma: bool) -> np.ndarray:

@@ -179,12 +179,18 @@ class DecodedView(QWidget):
             channels * width,
             QImage.Format.Format_RGB888
         )
-        self._pixmap = QPixmap.fromImage(image)
 
         if self._analysis is None or not any(self._overlay_flags.values()):
+            self._pixmap = QPixmap.fromImage(image)
             return
 
-        painter = QPainter(self._pixmap)
+        # Composite overlays onto an ARGB32_Premultiplied canvas: Qt's raster
+        # engine paints rectangles/lines onto it ~3-4x faster than onto a 24-bit
+        # RGB888 surface, which dominated overlay cost at 1440p (e.g. partition
+        # ~73 ms -> ~20 ms). convertToFormat also detaches from the numpy buffer.
+        canvas = image.convertToFormat(
+            QImage.Format.Format_ARGB32_Premultiplied)
+        painter = QPainter(canvas)
         try:
             for key, (_label, render) in OVERLAYS.items():
                 if self._overlay_flags.get(key):
@@ -194,6 +200,7 @@ class DecodedView(QWidget):
             print(f"Overlay rendering failed: {e}")
         finally:
             painter.end()
+        self._pixmap = QPixmap.fromImage(canvas)
 
     def _on_mouse_moved(self, pos: QPoint) -> None:
         """Map a label-space mouse position to a block info dict."""
