@@ -290,6 +290,10 @@ class Decoder:
                 analysis.tu_luma = self._block_sidecar.tu_luma_for(sc_index)
             if analysis.tu_chroma is None:
                 analysis.tu_chroma = self._block_sidecar.tu_chroma_for(sc_index)
+            if analysis.slice_lines is None:
+                analysis.slice_lines = self._block_sidecar.slice_lines_for(sc_index)
+            if analysis.tile_lines is None:
+                analysis.tile_lines = self._block_sidecar.tile_lines_for(sc_index)
             if analysis.mvs is None:
                 analysis.mvs = self._block_sidecar.mvs_for(sc_index)
             if analysis.qp_grid is None:

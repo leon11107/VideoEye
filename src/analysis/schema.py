@@ -73,6 +73,12 @@ class FrameAnalysis:
     tu_luma: Optional[np.ndarray] = None    # luma transform units (stage 2)
     tu_chroma: Optional[np.ndarray] = None  # chroma transform units (stage 2)
 
+    # Picture-structure boundary line segments [x1, y1, x2, y2] in pixels
+    # (HEVC). slice_lines: between CTBs of different slices; tile_lines: tile
+    # column/row boundaries. Shape (N, 4) int32, or None.
+    slice_lines: Optional[np.ndarray] = None
+    tile_lines: Optional[np.ndarray] = None
+
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
     extensions: dict = field(default_factory=dict)

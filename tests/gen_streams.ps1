@@ -24,6 +24,7 @@ $jobs = @(
     @("h264_mpegts.ts",           $in1080, "-frames:v 30 -c:v libx264 -crf 28 -f mpegts"),
     @("h264_high10.mp4",          $in1080, "-frames:v 20 -c:v libx264 -pix_fmt yuv420p10le -crf 28"),
     @("hevc_1080p.mp4",           $in1080, "-frames:v 30 -c:v libx265 -crf 28 -tag:v hvc1"),
+    @("hevc_slices4.mp4",         $in1080, "-frames:v 30 -c:v libx265 -crf 28 -tag:v hvc1 -x265-params slices=4"),
     @("av1_1080p.mp4",            $in1080, "-frames:v 30 -c:v libsvtav1 -crf 40")
 )
 

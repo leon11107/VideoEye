@@ -185,6 +185,27 @@ def render_block_types(painter: QPainter, analysis: FrameAnalysis) -> None:
             painter.fillRect(int(x), int(y), int(w), int(h), color)
 
 
+def _draw_lines(painter: QPainter, lines, color: QColor, width: int) -> None:
+    """Draw [x1,y1,x2,y2] segments (an (N,4) array) as thick lines."""
+    if lines is None or len(lines) == 0:
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(QPen(color, width))
+    painter.drawLines([QLineF(float(a), float(b), float(c), float(d))
+                       for a, b, c, d in lines])
+
+
+def render_slice_boundaries(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """HEVC slice boundaries (thick orange lines between CTBs of different
+    slices). No-op for codecs/streams without slice-structure data."""
+    _draw_lines(painter, analysis.slice_lines, QColor(255, 150, 30), 3)
+
+
+def render_tile_boundaries(painter: QPainter, analysis: FrameAnalysis) -> None:
+    """HEVC tile boundaries (thick cyan lines at tile column/row splits)."""
+    _draw_lines(painter, analysis.tile_lines, QColor(40, 220, 230), 3)
+
+
 # Flat overlay registry: key -> (label, render function). Each is rendered
 # independently. The partition layers are handled separately (render_partition)
 # because they compose (CU base + PU/TU refinements) rather than stack.
@@ -193,6 +214,8 @@ OVERLAYS = {
     "mv": ("Motion Vectors", render_motion_vectors),
     "types": ("Block Types", render_block_types),
     "blocksize": ("Block Size", render_block_size),
+    "slice": ("Slice Boundaries", render_slice_boundaries),
+    "tile": ("Tile Boundaries", render_tile_boundaries),
 }
 
 # Master flag: enabling partition always draws CU. PARTITION_LAYERS are the

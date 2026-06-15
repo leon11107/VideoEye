@@ -34,6 +34,11 @@ _TU_HDR = struct.Struct("<III")
 # 16 i32 L0 ref POCs and 16 i32 L1 ref POCs.
 _MAX_REFS = 16
 _REF_HDR = struct.Struct("<iii%di%di" % (_MAX_REFS, _MAX_REFS))
+# v6 HEVC: appended after the ref section -> u32 ctb_size, ctb_w, ctb_h,
+# num_tile_cols, num_tile_rows, then ctb_w*ctb_h i32 slice ids (CTB raster),
+# then (num_tile_cols+1) u32 tile column x-boundaries and (num_tile_rows+1)
+# u32 tile row y-boundaries, all in pixels.
+_STRUCT_HDR = struct.Struct("<IIIII")
 # VeyeBlockRecord (H.264): u32 mb_type, i32 qp
 _REC = np.dtype([("mb_type", "<u4"), ("qp", "<i4")])
 # VeyeBlockRecordHEVC (sidecar v2): u8 cu_log2, u8 pred, u8 intra_mode,
@@ -128,6 +133,10 @@ class VeyeFrameBlocks:
     own_poc: Optional[int] = None           # HEVC: this frame's POC (v5)
     ref_l0: tuple = ()                      # HEVC: L0 reference POCs
     ref_l1: tuple = ()                      # HEVC: L1 reference POCs
+    ctb_size: int = 0                       # HEVC: luma CTB size px (v6)
+    slice_grid: Optional[np.ndarray] = None  # HEVC: (ctb_h, ctb_w) i32 slice id
+    tile_col_bd: tuple = ()                 # HEVC: tile column x-boundaries (px)
+    tile_row_bd: tuple = ()                 # HEVC: tile row y-boundaries (px)
     mv: Optional[np.ndarray] = None         # HEVC/AV1: int16 grid (h, w, 2 lists, 2 xy)
     ref_idx: Optional[np.ndarray] = None    # HEVC/AV1: int8 grid (h, w, 2 lists)
     bsize: Optional[np.ndarray] = None      # AV1: BLOCK_SIZE enum per 4x4 MI cell
@@ -264,6 +273,10 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         own_poc = None
         ref_l0: tuple = ()
         ref_l1: tuple = ()
+        ctb_size = 0
+        slice_grid = None
+        tile_col_bd: tuple = ()
+        tile_row_bd: tuple = ()
         if _ver >= 4:
             tu_off = _BLK_HDR.size + n_records * _REC_HEVC.itemsize
             if len(payload) >= tu_off + _TU_HDR.size:
@@ -282,6 +295,26 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                     l1 = vals[3 + _MAX_REFS:3 + 2 * _MAX_REFS]
                     ref_l0 = tuple(l0[:max(0, nb_l0)])
                     ref_l1 = tuple(l1[:max(0, nb_l1)])
+                # v6: picture-structure section after the ref section.
+                st_off = ref_off + _REF_HDR.size
+                if _ver >= 6 and len(payload) >= st_off + _STRUCT_HDR.size:
+                    ctb_size, ctw, cth, ntc, ntr = _STRUCT_HDR.unpack_from(
+                        payload, st_off)
+                    grid_off = st_off + _STRUCT_HDR.size
+                    n_ctb = ctw * cth
+                    end = grid_off + n_ctb * 4 + (ntc + 1) * 4 + (ntr + 1) * 4
+                    if ctw > 0 and cth > 0 and len(payload) >= end:
+                        slice_grid = np.frombuffer(
+                            payload, dtype="<i4", count=n_ctb, offset=grid_off
+                        ).reshape(cth, ctw).copy()
+                        cbd_off = grid_off + n_ctb * 4
+                        rbd_off = cbd_off + (ntc + 1) * 4
+                        tile_col_bd = tuple(np.frombuffer(
+                            payload, dtype="<u4", count=ntc + 1, offset=cbd_off
+                        ).tolist())
+                        tile_row_bd = tuple(np.frombuffer(
+                            payload, dtype="<u4", count=ntr + 1, offset=rbd_off
+                        ).tolist())
 
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
@@ -294,6 +327,8 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             ct_depth=recs["ct_depth"].reshape(grid_h, grid_w).copy(),
             tu_log2=tu_log2, tu_unit=tu_unit,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
+            ctb_size=ctb_size, slice_grid=slice_grid,
+            tile_col_bd=tile_col_bd, tile_row_bd=tile_row_bd,
             mv=mv, ref_idx=ref,
         )
 
@@ -615,6 +650,51 @@ def tu_chroma_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     if fb.codec_id == _CODEC_AV1:
         return _av1_tus(fb, chroma=True)
     return _tu_rects(fb, chroma=True)
+
+
+def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """HEVC slice boundary segments [x1,y1,x2,y2] (px): the CTB edges where the
+    slice id changes between neighbours. Returns an (N,4) int32 array."""
+    sg = fb.slice_grid
+    cs = fb.ctb_size
+    if sg is None or cs <= 0:
+        return np.empty((0, 4), dtype=np.int32)
+    ch, cw = sg.shape
+    out: list[tuple] = []
+    for cy in range(ch):
+        for cx in range(cw):
+            sid = int(sg[cy, cx])
+            if sid < 0:
+                continue
+            if cx > 0 and int(sg[cy, cx - 1]) != sid:  # left edge
+                x = cx * cs
+                out.append((x, cy * cs, x, (cy + 1) * cs))
+            if cy > 0 and int(sg[cy - 1, cx]) != sid:  # top edge
+                y = cy * cs
+                out.append((cx * cs, y, (cx + 1) * cs, y))
+    return np.array(out, dtype=np.int32) if out else np.empty((0, 4), np.int32)
+
+
+def tile_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """HEVC tile boundary segments [x1,y1,x2,y2] (px): internal tile column /
+    row boundaries spanning the picture. Returns an (N,4) int32 array."""
+    cbd = fb.tile_col_bd
+    rbd = fb.tile_row_bd
+    cs = fb.ctb_size
+    if (len(cbd) <= 2 and len(rbd) <= 2):
+        return np.empty((0, 4), dtype=np.int32)  # single tile: no internal bds
+    if fb.slice_grid is not None and cs > 0:
+        ch, cw = fb.slice_grid.shape
+        w, h = cw * cs, ch * cs
+    else:
+        w = cbd[-1] if cbd else 0
+        h = rbd[-1] if rbd else 0
+    out: list[tuple] = []
+    for x in cbd[1:-1]:               # internal vertical boundaries
+        out.append((int(x), 0, int(x), int(h)))
+    for y in rbd[1:-1]:               # internal horizontal boundaries
+        out.append((0, int(y), int(w), int(y)))
+    return np.array(out, dtype=np.int32) if out else np.empty((0, 4), np.int32)
 
 
 def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:

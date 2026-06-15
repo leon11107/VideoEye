@@ -37,6 +37,8 @@ from .veye_sidecar import (
     pus_from_frame,
     qp_grid_from_frame,
     read_incremental,
+    slice_lines_from_frame,
+    tile_lines_from_frame,
     tu_chroma_from_frame,
     tu_luma_from_frame,
 )
@@ -105,7 +107,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v8"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v9"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -315,6 +317,16 @@ class BlockSidecar:
         """QP grid (int16, -1 = unknown) for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return qp_grid_from_frame(fb) if fb is not None else None
+
+    def slice_lines_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """HEVC slice boundary segments (N,4) for a frame, or None."""
+        fb = self._frame(frame_index)
+        return slice_lines_from_frame(fb) if fb is not None else None
+
+    def tile_lines_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """HEVC tile boundary segments (N,4) for a frame, or None."""
+        fb = self._frame(frame_index)
+        return tile_lines_from_frame(fb) if fb is not None else None
 
     def block_unit_for(self, frame_index: int) -> Optional[int]:
         """Pixels per QP/block grid cell for a frame, or None if not ready."""
