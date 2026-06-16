@@ -2,7 +2,9 @@
  * veye_probe — decode a video stream with patched FFmpeg and dump per-frame
  * block analysis (AV_FRAME_DATA_VEYE_BLOCKINFO) to a compact sidecar file.
  *
- * Usage: veye_probe <input> <output.veblk>
+ * Usage: veye_probe <input> <output.veblk> [max_frames]
+ *   max_frames (optional): stop after decoding this many frames (for quick
+ *   inspection of the first few frames instead of a whole long stream).
  *
  * Sidecar layout (native-endian):
  *   file header:
@@ -41,11 +43,15 @@ int main(int argc, char **argv)
     FILE *out = NULL;
     int vid = -1, ret = 0;
     uint32_t n_frames = 0, frame_index = 0;
+    uint32_t max_frames = 0;  /* 0 = no limit */
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <input> <output.veblk>\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s <input> <output.veblk> [max_frames]\n",
+                argv[0]);
         return 2;
     }
+    if (argc == 4)
+        max_frames = (uint32_t)strtoul(argv[3], NULL, 10);
 
     if ((ret = avformat_open_input(&fmt, argv[1], NULL, NULL)) < 0) {
         fprintf(stderr, "open_input failed: %d\n", ret);
@@ -109,11 +115,15 @@ int main(int argc, char **argv)
             n_frames++;
             frame_index++;
             av_frame_unref(frame);
+            if (max_frames && n_frames >= max_frames)
+                goto done;
         }
         if (!got_pkt)
             break;
         ret = 0;
     }
+
+done:
 
     /* Patch n_frames in the file header. */
     fseek(out, 8, SEEK_SET);
