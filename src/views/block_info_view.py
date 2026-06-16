@@ -59,6 +59,12 @@ def _kv_row(parent: QTreeWidgetItem, name: str, value: str) -> None:
     QTreeWidgetItem(parent, [name, value])
 
 
+# Overlay groups whose sub-layers are mutually exclusive (radio-style): the
+# Bit Size metrics are separate heatmaps that overdraw if combined, so only one
+# may be active at a time.
+_EXCLUSIVE_GROUPS = {"bits"}
+
+
 class OverlayControls(QWidget):
     """Overlay enable/disable toggles."""
 
@@ -109,12 +115,22 @@ class OverlayControls(QWidget):
         container = QWidget()
         sub_layout = QVBoxLayout(container)
         sub_layout.setContentsMargins(28, 0, 0, 0)  # indent under the master
+        exclusive = master_key in _EXCLUSIVE_GROUPS
+        sub_cbs = []
         for key, sub_label in subs:
             cb = QCheckBox(sub_label)
             cb.setChecked(key in DEFAULT_ON)
-            cb.toggled.connect(self._on_toggled)
             sub_layout.addWidget(cb)
             self._checkboxes[key] = cb
+            sub_cbs.append(cb)
+        # Exclusive groups (e.g. Bit Size) behave like radio buttons: checking
+        # one clears its siblings. Others allow any combination.
+        for cb in sub_cbs:
+            if exclusive:
+                cb.toggled.connect(
+                    lambda chk, c=cb, g=sub_cbs: self._on_exclusive(chk, c, g))
+            else:
+                cb.toggled.connect(self._on_toggled)
         container.setVisible(False)            # hidden until expanded
         container.setEnabled(master_cb.isChecked())
         master_cb.toggled.connect(container.setEnabled)
@@ -126,6 +142,17 @@ class OverlayControls(QWidget):
         container.setVisible(expanded)
         btn.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _on_exclusive(self, checked, cb, group) -> None:
+        """Radio-style: when a sub is checked, clear its siblings (then emit a
+        single update). Unchecking the active one is allowed (shows none)."""
+        if checked:
+            for other in group:
+                if other is not cb and other.isChecked():
+                    other.blockSignals(True)
+                    other.setChecked(False)
+                    other.blockSignals(False)
+        self._on_toggled()
 
     def _on_toggled(self):
         self.overlays_changed.emit(self.overlay_flags())
