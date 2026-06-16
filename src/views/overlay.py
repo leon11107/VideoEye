@@ -386,7 +386,7 @@ PARTITION_LAYERS = (
 )
 OVERLAY_GROUPS = {
     PARTITION_KEY: ("Partition", PARTITION_LAYERS, render_partition),
-    "mode": ("Mode", (
+    "mode": ("Intra/Inter Mode", (
         ("mode_inter", "Inter (MV)"),
         ("mode_intra_angular", "Intra Angular"),
         ("mode_intra_plane", "Intra Plane"),
