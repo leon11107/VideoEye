@@ -28,6 +28,7 @@ class _ImageLabel(QLabel):
 
     mouse_moved = pyqtSignal(QPoint)
     mouse_left = pyqtSignal()
+    clicked = pyqtSignal(QPoint)             # left-click (no drag) at label pos
     panned = pyqtSignal(int, int)            # mouse movement dx, dy while dragging
     zoom_requested = pyqtSignal(int, QPoint)  # wheel delta, cursor pos in label
 
@@ -36,6 +37,7 @@ class _ImageLabel(QLabel):
         self.setMouseTracking(True)
         self._panning = False
         self._pan_last = QPoint()
+        self._press_pos = None    # label-space press position, to detect clicks
         self._hover_paint = None  # callable(painter): draws the hover overlay
 
     def paintEvent(self, event):
@@ -51,6 +53,7 @@ class _ImageLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self._panning = True
             self._pan_last = event.globalPosition().toPoint()
+            self._press_pos = event.position().toPoint()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         super().mousePressEvent(event)
 
@@ -68,6 +71,13 @@ class _ImageLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton and self._panning:
             self._panning = False
             self.unsetCursor()
+            # A press+release with negligible movement is a click (not a pan):
+            # use it to toggle the block-info lock.
+            if self._press_pos is not None:
+                d = event.position().toPoint() - self._press_pos
+                if abs(d.x()) + abs(d.y()) <= 4:
+                    self.clicked.emit(self._press_pos)
+            self._press_pos = None
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
@@ -97,6 +107,8 @@ class DecodedView(QWidget):
         self._fit_to_window = True
         self._frame_index = -1
         self._hover_region = None  # QRect (native px) of the LCU/MB under cursor
+        self._locked = False       # block-info display frozen to a clicked region
+        self._locked_pos = None    # (px, py) of the locked region in native px
         self._setup_ui()
         self._image_label._hover_paint = self._draw_hover
 
@@ -126,6 +138,7 @@ class DecodedView(QWidget):
         self._image_label.setStyleSheet("background-color: #1a1a1a;")
         self._image_label.mouse_moved.connect(self._on_mouse_moved)
         self._image_label.mouse_left.connect(self._on_mouse_left)
+        self._image_label.clicked.connect(self._on_clicked)
         self._image_label.panned.connect(self._on_panned)
         self._image_label.zoom_requested.connect(self._on_zoom_requested)
 
@@ -145,6 +158,17 @@ class DecodedView(QWidget):
         self._compose()
         self._update_display()
         self._update_info()
+
+        # Keep the locked region pinned across frame changes: re-evaluate the
+        # same pixel against the new frame's analysis so the frozen panel stays
+        # meaningful (e.g. stepping frames to compare one region).
+        if self._locked and self._locked_pos is not None and analysis is not None:
+            px, py = self._locked_pos
+            if px < self._pixmap.width() and py < self._pixmap.height():
+                self._show_block_at(px, py, locked=True)
+            else:
+                self._locked = False
+                self._locked_pos = None
 
     def has_overlays(self) -> bool:
         """True if any analysis overlay is currently enabled."""
@@ -206,23 +230,25 @@ class DecodedView(QWidget):
             painter.end()
         self._pixmap = QPixmap.fromImage(canvas)
 
-    def _on_mouse_moved(self, pos: QPoint) -> None:
-        """Map a label-space mouse position to a block info dict."""
+    def _label_to_px(self, pos: QPoint):
+        """Map a label-space position to native frame pixel (px, py), or None if
+        unavailable / outside the frame."""
         if self._pixmap is None or self._analysis is None:
-            return
+            return None
         shown = self._image_label.pixmap()
         if shown is None or shown.width() == 0 or shown.height() == 0:
-            return
-
+            return None
         # Label is resized to exactly fit the scaled pixmap.
         px = int(pos.x() * self._pixmap.width() / shown.width())
         py = int(pos.y() * self._pixmap.height() / shown.height())
         if not (0 <= px < self._pixmap.width() and 0 <= py < self._pixmap.height()):
-            self.block_hovered.emit(None)
-            return
+            return None
+        return px, py
 
+    def _info_at(self, px: int, py: int) -> dict:
+        """Build the block-info dict for native pixel (px, py)."""
         a = self._analysis
-        info = {
+        return {
             "codec": a.codec,
             "px": px,
             "py": py,
@@ -239,15 +265,46 @@ class DecodedView(QWidget):
             "slice_idx": a.slice_idx_at(px, py),
             "tile_idx": a.tile_idx_at(px, py),
         }
-        self.block_hovered.emit(info)
 
-        # Always draw the hovered LCU/MB region's partition/MV/type on the
-        # canvas, independent of the overlay toggles. Repaint only when the
-        # region (not every pixel) changes.
+    def _show_block_at(self, px: int, py: int, locked: bool = False) -> None:
+        """Emit block info for (px, py) and highlight its LCU/MB region."""
+        info = self._info_at(px, py)
+        info["locked"] = locked
+        self.block_hovered.emit(info)
         region = self._lcu_region(px, py)
         if region != self._hover_region:
             self._hover_region = region
-            self._image_label.update()
+        self._image_label.update()
+
+    def _on_mouse_moved(self, pos: QPoint) -> None:
+        """Map a label-space mouse position to a block info dict (live hover).
+        While locked, the display is frozen and moves are ignored."""
+        if self._locked:
+            return
+        if self._pixmap is None or self._analysis is None:
+            return
+        coord = self._label_to_px(pos)
+        if coord is None:
+            self.block_hovered.emit(None)
+            return
+        self._show_block_at(*coord)
+
+    def _on_clicked(self, pos: QPoint) -> None:
+        """Toggle the block-info lock: a click freezes the display to the
+        clicked region; clicking again (anywhere) releases it."""
+        if self._pixmap is None or self._analysis is None:
+            return
+        if self._locked:
+            self._locked = False
+            self._locked_pos = None
+            self._on_mouse_moved(pos)   # resume live hover at the click point
+            return
+        coord = self._label_to_px(pos)
+        if coord is None:
+            return
+        self._locked = True
+        self._locked_pos = coord
+        self._show_block_at(*coord, locked=True)
 
     def _lcu_region(self, px: int, py: int) -> QRect:
         """The LCU/MB cell (native px) containing (px, py): 16 for H.264, 64
@@ -261,6 +318,8 @@ class DecodedView(QWidget):
         return QRect(rx, ry, w, h)
 
     def _on_mouse_left(self) -> None:
+        if self._locked:
+            return                       # keep the locked region/info on screen
         self.block_hovered.emit(None)
         if self._hover_region is not None:
             self._hover_region = None
@@ -292,8 +351,11 @@ class DecodedView(QWidget):
         render_partition(painter, region_an, _HOVER_FLAGS)
         render_mode(painter, region_an, _HOVER_FLAGS)
         painter.setClipping(False)
-        # Outline the inspected region.
-        painter.setPen(QPen(QColor(255, 255, 0, 200), 1.0))
+        # Outline the inspected region: green when locked, yellow while hovering.
+        if self._locked:
+            painter.setPen(QPen(QColor(0, 230, 80, 230), 2.0))
+        else:
+            painter.setPen(QPen(QColor(255, 255, 0, 200), 1.0))
         painter.drawRect(r)
         painter.restore()
 
@@ -448,5 +510,7 @@ class DecodedView(QWidget):
         self._analysis = None
         self._frame_index = -1
         self._hover_region = None
+        self._locked = False
+        self._locked_pos = None
         self._image_label.clear()
         self._info_label.setText("No frame loaded")

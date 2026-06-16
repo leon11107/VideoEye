@@ -268,6 +268,11 @@ class BlockHoverPanel(QWidget):
         ctu_bits = info.get("ctu_bits")
         unit = info["unit"]
 
+        if info.get("locked"):
+            lk = QTreeWidgetItem(self._tree, ["\U0001f512 locked", "click to release"])
+            lk.setForeground(0, QBrush(QColor("#2ecc40")))
+            lk.setForeground(1, QBrush(QColor("#888888")))
+
         loc = self._section("Location")
         self._row(loc, "pixel", f"({info['px']}, {info['py']})")
         self._row(loc, "block", f"({info['block_x']}, {info['block_y']})")
