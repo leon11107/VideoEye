@@ -107,6 +107,27 @@ for loc in common:
     tr_ok += int(r["tu"]) == mbs[loc]["trans"]
 print(f"per-MB total bits match:     {tot_ok}/{bn}")
 print(f"per-MB transform bits match: {tr_ok}/{bn}")
+
+# intra mode (sub_pdir) vs our canonical per-MB luma mode, and slice id.
+SUBP = {"VERTICAL_MODE": 0, "HORIZONTAL_MODE": 1, "DC_MODE": 2, "PLANE_MODE": 3}
+if fb.mb_luma_mode is not None:
+    unit2 = fb.block_unit
+    mode_ok = mode_n = 0
+    for loc in common:
+        sp = mbs[loc].get("sub_pdir")
+        if sp not in SUBP:
+            continue
+        col, row = loc[0] // unit2, loc[1] // unit2
+        mode_n += 1
+        mode_ok += int(fb.mb_luma_mode[row, col]) == SUBP[sp]
+    print(f"intra mode (sub_pdir) match: {mode_ok}/{mode_n}")
+if fb.mb_slice_id is not None:
+    sl_ok = 0
+    for loc in common:
+        if "slice" not in mbs[loc]:
+            continue
+        col, row = loc[0] // fb.block_unit, loc[1] // fb.block_unit
+        sl_ok += int(fb.mb_slice_id[row, col]) == mbs[loc]["slice"]
+    print(f"slice id match:              {sl_ok}/{len(common)}")
 print("NOTE: prediction = total - transform by our definition (includes the MB"
       " header), so it is not expected to match Elecard's narrower prediction.")
-print("Still missing: detailed MB type, intra mode (sub_pdir), per-MB slice id")

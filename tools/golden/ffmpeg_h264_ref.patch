@@ -95,16 +95,26 @@ index 74840e5..1f32df8 100644
  }
  
 diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
-index 7e53e38..aa984e1 100644
+index 7e53e38..213fe7f 100644
 --- a/libavcodec/h264_slice.c
 +++ b/libavcodec/h264_slice.c
-@@ -169,14 +169,18 @@ static int init_table_pools(H264Context *h)
+@@ -37,6 +37,7 @@
+ #include "error_resilience.h"
+ #include "avcodec.h"
+ #include "h264.h"
++#include "veye_blockinfo.h"
+ #include "h264dec.h"
+ #include "h264data.h"
+ #include "h264chroma.h"
+@@ -169,14 +170,20 @@ static int init_table_pools(H264Context *h)
      h->qscale_table_pool = av_refstruct_pool_alloc(big_mb_num + h->mb_stride, 0);
      h->mb_type_pool      = av_refstruct_pool_alloc((big_mb_num + h->mb_stride) *
                                                     sizeof(uint32_t), 0);
-+    /* VEYE: 3 int32 per MB (total / prediction / transform bit cost). */
++    /* VEYE: VEYE_H264_MB_STRIDE int32 per MB (total/pred/transform bits, intra
++     * type, luma intra mode, slice id). */
 +    h->veye_mb_bits_pool = av_refstruct_pool_alloc((big_mb_num + h->mb_stride) *
-+                                                   3 * sizeof(int32_t), 0);
++                                                   VEYE_H264_MB_STRIDE *
++                                                   sizeof(int32_t), 0);
      h->motion_val_pool   = av_refstruct_pool_alloc(2 * (b4_array_size + 4) *
                                                     sizeof(int16_t), 0);
      h->ref_index_pool    = av_refstruct_pool_alloc(4 * mb_array_size, 0);
@@ -118,19 +128,66 @@ index 7e53e38..aa984e1 100644
          av_refstruct_pool_uninit(&h->motion_val_pool);
          av_refstruct_pool_uninit(&h->ref_index_pool);
          return AVERROR(ENOMEM);
-@@ -251,6 +255,11 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
+@@ -185,6 +192,45 @@ static int init_table_pools(H264Context *h)
+     return 0;
+ }
+ 
++/* VEYE: normalize FFmpeg's h264pred 16x16/chroma mode enum (DC_PRED8x8=0,
++ * HOR=1, VERT=2, PLANE=3, plus DC edge variants 4..10) to canonical H.264
++ * Intra16x16PredMode (0 Vertical, 1 Horizontal, 2 DC, 3 Plane) so it matches
++ * Elecard's sub_pdir. */
++static int veye_norm_i16(int m)
++{
++    switch (m) {
++    case 2:  return 0;   /* VERT_PRED8x8  -> Vertical   */
++    case 1:  return 1;   /* HOR_PRED8x8   -> Horizontal */
++    case 3:  return 3;   /* PLANE_PRED8x8 -> Plane      */
++    default: return 2;   /* DC_PRED8x8 and all DC edge variants -> DC */
++    }
++}
++
++/* VEYE: record one MB's bit cost plus intra type / representative luma intra
++ * mode / slice id into the picture's per-MB scratch table. For I_NxN the luma
++ * mode is the top-left 4x4 block's mode (Elecard reports one sub_pdir per MB).
++ * I_4x4 modes 0..8 are canonical already; DC edge variants (>=9) fold to DC. */
++static void veye_record_mb(const H264Context *h, H264SliceContext *sl,
++                           int total, int trans)
++{
++    int mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
++    int32_t *r = h->cur_pic.veye_mb_bits + mb_xy * VEYE_H264_MB_STRIDE;
++    int mt = h->cur_pic.mb_type[mb_xy];
++    int itype = 0, lmode = -1;
++    if (IS_INTRA_PCM(mt))       itype = 3;
++    else if (IS_INTRA16x16(mt)) { itype = 2;
++                                  lmode = veye_norm_i16(sl->intra16x16_pred_mode); }
++    else if (IS_INTRA(mt))      { itype = 1;
++                                  lmode = sl->intra4x4_pred_mode_cache[scan8[0]];
++                                  if (lmode > 8) lmode = 2; }
++    r[0] = total;
++    r[1] = total - trans;
++    r[2] = trans;
++    r[3] = itype;
++    r[4] = lmode;
++    r[5] = sl->slice_num - 1;   /* 0-based slice id within the frame */
++}
++
+ static int alloc_picture(H264Context *h, H264Picture *pic)
+ {
+     int i, ret = 0;
+@@ -251,6 +297,12 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
      pic->mb_type      = pic->mb_type_base + 2 * h->mb_stride + 1;
      pic->qscale_table = pic->qscale_table_base + 2 * h->mb_stride + 1;
  
 +    pic->veye_mb_bits_base = av_refstruct_pool_get(h->veye_mb_bits_pool);
 +    if (!pic->veye_mb_bits_base)
 +        goto fail;
-+    pic->veye_mb_bits = pic->veye_mb_bits_base + (2 * h->mb_stride + 1) * 3;
++    pic->veye_mb_bits = pic->veye_mb_bits_base
++                        + (2 * h->mb_stride + 1) * VEYE_H264_MB_STRIDE;
 +
      for (i = 0; i < 2; i++) {
          pic->motion_val_base[i] = av_refstruct_pool_get(h->motion_val_pool);
          pic->ref_index[i]       = av_refstruct_pool_get(h->ref_index_pool);
-@@ -2613,7 +2622,23 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2613,7 +2665,20 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                  return AVERROR_INVALIDDATA;
              }
  
@@ -141,21 +198,18 @@ index 7e53e38..aa984e1 100644
 +                ret = ff_h264_decode_mb_cabac(h, sl);
 +                if (ret >= 0 && h->cur_pic.veye_mb_bits) {
 +                    int veye_end = veye_cabac_bits(&sl->cabac);
-+                    int mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
 +                    int total = veye_end - veye_start;
 +                    int trans = sl->veye_pred_end_bits >= 0
 +                                ? veye_end - sl->veye_pred_end_bits : 0;
 +                    if (trans < 0) trans = 0;
 +                    if (trans > total) trans = total;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 0] = total;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 1] = total - trans;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 2] = trans;
++                    veye_record_mb(h, sl, total, trans);
 +                }
 +            }
  
              if (ret >= 0)
                  ff_h264_hl_decode_mb(h, sl);
-@@ -2684,7 +2709,23 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2684,7 +2749,20 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                  return AVERROR_INVALIDDATA;
              }
  
@@ -166,15 +220,12 @@ index 7e53e38..aa984e1 100644
 +                ret = ff_h264_decode_mb_cavlc(h, sl);
 +                if (ret >= 0 && h->cur_pic.veye_mb_bits) {
 +                    int veye_end = get_bits_count(&sl->gb);
-+                    int mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
 +                    int total = veye_end - veye_start;
 +                    int trans = sl->veye_pred_end_bits >= 0
 +                                ? veye_end - sl->veye_pred_end_bits : 0;
 +                    if (trans < 0) trans = 0;
 +                    if (trans > total) trans = total;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 0] = total;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 1] = total - trans;
-+                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 2] = trans;
++                    veye_record_mb(h, sl, total, trans);
 +                }
 +            }
  

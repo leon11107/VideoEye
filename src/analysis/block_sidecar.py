@@ -110,7 +110,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v11"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v12"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -353,6 +353,13 @@ class BlockSidecar:
         """HEVC tile boundary segments (N,4) for a frame, or None."""
         fb = self._frame(frame_index)
         return tile_lines_from_frame(fb) if fb is not None else None
+
+    def h264_aux_for(self, frame_index: int):
+        """H.264 per-MB (intra_type, luma_mode, slice_id) grids, or None."""
+        fb = self._frame(frame_index)
+        if fb is None or fb.mb_intra_type is None:
+            return None
+        return fb.mb_intra_type, fb.mb_luma_mode, fb.mb_slice_id
 
     def block_unit_for(self, frame_index: int) -> Optional[int]:
         """Pixels per QP/block grid cell for a frame, or None if not ready."""

@@ -160,6 +160,11 @@ class VeyeFrameBlocks:
     mb_total_bits: Optional[np.ndarray] = None
     mb_pred_bits: Optional[np.ndarray] = None
     mb_trans_bits: Optional[np.ndarray] = None
+    # H.264 per-MB aux (v9): intra type (0 inter/skip, 1 I_NxN, 2 I_16x16,
+    # 3 PCM), representative luma intra mode (-1 if not intra), slice id.
+    mb_intra_type: Optional[np.ndarray] = None
+    mb_luma_mode: Optional[np.ndarray] = None
+    mb_slice_id: Optional[np.ndarray] = None
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -412,6 +417,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
     ref_l0: tuple = ()
     ref_l1: tuple = ()
     mb_total = mb_pred = mb_trans = None
+    mb_itype = mb_lmode = mb_slice = None
     if _ver >= 5:
         ref_off = _BLK_HDR.size + n_records * _REC.itemsize
         if len(payload) >= ref_off + _REF_HDR.size:
@@ -432,12 +438,26 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                 mb_total = bg[..., 0].copy()
                 mb_pred = bg[..., 1].copy()
                 mb_trans = bg[..., 2].copy()
+            # v9 aux: n int8 intra type, n int8 luma mode, n int16 slice id.
+            if _ver >= 9:
+                aux_off = bits_off + 3 * n_records * 4
+                if len(payload) >= aux_off + n_records * 4:
+                    it = np.frombuffer(payload, dtype="<i1", count=n_records,
+                                       offset=aux_off)
+                    lm = np.frombuffer(payload, dtype="<i1", count=n_records,
+                                       offset=aux_off + n_records)
+                    sid = np.frombuffer(payload, dtype="<i2", count=n_records,
+                                        offset=aux_off + 2 * n_records)
+                    mb_itype = it.reshape(grid_h, grid_w).copy()
+                    mb_lmode = lm.reshape(grid_h, grid_w).copy()
+                    mb_slice = sid.reshape(grid_h, grid_w).copy()
     return VeyeFrameBlocks(
         codec_id, grid_w, grid_h, block_unit,
         qp=recs["qp"].reshape(grid_h, grid_w).copy(),
         mb_type=recs["mb_type"].reshape(grid_h, grid_w).copy(),
         own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
         mb_total_bits=mb_total, mb_pred_bits=mb_pred, mb_trans_bits=mb_trans,
+        mb_intra_type=mb_itype, mb_luma_mode=mb_lmode, mb_slice_id=mb_slice,
     )
 
 

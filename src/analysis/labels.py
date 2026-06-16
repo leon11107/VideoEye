@@ -36,6 +36,42 @@ def block_type_label(codec: str, mode: int) -> str:
     return _H264_SHAPES.get(mode, f"shape {mode}")
 
 
+# H.264 intra prediction mode names (canonical, normalized in the decoder).
+# I_16x16 uses the first four (Vertical/Horizontal/DC/Plane); I_4x4 / I_8x8 add
+# the directional modes 3..8.
+_H264_INTRA16 = ("Vertical", "Horizontal", "DC", "Plane")
+_H264_INTRA4 = (
+    "Vertical", "Horizontal", "DC", "Diag Down-Left", "Diag Down-Right",
+    "Vertical-Right", "Horizontal-Down", "Vertical-Left", "Horizontal-Up",
+)
+
+
+def h264_intra_mode_name(intra_type: int, mode: int) -> str:
+    """Name for an H.264 macroblock's canonical luma intra mode (sub_pdir)."""
+    if intra_type == 3:
+        return "PCM"
+    if intra_type == 2:
+        return _H264_INTRA16[mode] if 0 <= mode < 4 else f"mode {mode}"
+    if intra_type == 1:
+        return _H264_INTRA4[mode] if 0 <= mode < 9 else f"mode {mode}"
+    return "n/a"
+
+
+def h264_mb_type_label(intra_type: int, pred: int) -> str:
+    """Short H.264 macroblock type label (PredType in pred; intra_type refines
+    the intra family)."""
+    if intra_type == 3:
+        return "I_PCM"
+    if intra_type == 2:
+        return "I_16x16"
+    if intra_type == 1:
+        return "I_NxN"
+    # inter families come from the prediction class
+    from .schema import PredType
+    return {PredType.SKIP: "P_Skip", PredType.INTER: "P/B inter",
+            PredType.BI: "B_Bi"}.get(pred, "inter")
+
+
 def qp_field_name(codec: str) -> str:
     """Label for the QP-like value (AV1 carries qindex, not a 0..51 QP)."""
     return "qindex" if codec == "av1" else "qp"

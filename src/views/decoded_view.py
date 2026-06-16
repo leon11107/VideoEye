@@ -264,6 +264,7 @@ class DecodedView(QWidget):
             "ctb_size": a.ctb_size,
             "slice_idx": a.slice_idx_at(px, py),
             "tile_idx": a.tile_idx_at(px, py),
+            "h264_aux": a.h264_aux_at(px, py),
         }
 
     def _show_block_at(self, px: int, py: int, locked: bool = False) -> None:

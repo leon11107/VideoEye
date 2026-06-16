@@ -122,6 +122,13 @@ class FrameAnalysis:
     tile_col_bd: tuple = ()
     tile_row_bd: tuple = ()
 
+    # H.264 per-MB aux at qp_unit (16px) granularity: intra type (0 inter/skip,
+    # 1 I_NxN, 2 I_16x16, 3 PCM), canonical luma intra mode (-1 if not intra),
+    # slice id. None for other codecs.
+    h264_intra_type: Optional[np.ndarray] = None
+    h264_luma_mode: Optional[np.ndarray] = None
+    h264_slice: Optional[np.ndarray] = None
+
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
     extensions: dict = field(default_factory=dict)
@@ -212,6 +219,18 @@ class FrameAnalysis:
         if col < 0 or row < 0:
             return None
         return row * len(self.tile_col_bd) + col
+
+    def h264_aux_at(self, px: int, py: int):
+        """H.264 (intra_type, luma_mode, slice_id) at pixel (px, py), or None."""
+        if self.h264_intra_type is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        g = self.h264_intra_type
+        if row >= g.shape[0] or col >= g.shape[1]:
+            return None
+        return (int(self.h264_intra_type[row, col]),
+                int(self.h264_luma_mode[row, col]),
+                int(self.h264_slice[row, col]))
 
     def block_at(self, px: int, py: int):
         """Coding block (BLOCK_DTYPE record) covering pixel (px, py), or None.

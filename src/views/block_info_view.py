@@ -15,7 +15,10 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
-from ..analysis import PredType, block_type_label, qp_field_name
+from ..analysis import (
+    PredType, block_type_label, qp_field_name,
+    h264_intra_mode_name, h264_mb_type_label,
+)
 from .overlay import OVERLAYS, DEFAULT_ON, OVERLAY_GROUPS
 
 # Elecard-like section header coloring.
@@ -266,6 +269,7 @@ class BlockHoverPanel(QWidget):
         mvs = info.get("mvs")
         bits = info.get("bits")
         ctu_bits = info.get("ctu_bits")
+        aux = info.get("h264_aux")        # H.264: (intra_type, luma_mode, slice)
         unit = info["unit"]
 
         if info.get("locked"):
@@ -298,14 +302,23 @@ class BlockHoverPanel(QWidget):
                 _kv_row(size, "prediction", str(int(ctu_bits["pu"])))
                 _kv_row(size, "transform", str(int(ctu_bits["tu"])))
 
-        cu = self._section("Coded Unit")
+        title = "Macroblock" if codec in ("h264", "avc") else "Coded Unit"
+        cu = self._section(title)
         if block is not None:
-            self._row(cu, "type", block_type_label(codec, int(block["mode"])))
+            if aux is not None:
+                self._row(cu, "type", h264_mb_type_label(aux[0], int(block["pred"])))
+            else:
+                self._row(cu, "type", block_type_label(codec, int(block["mode"])))
             self._row(cu, "dimensions", f"{int(block['w'])}x{int(block['h'])}")
             self._row(cu, "prediction",
                       PredType.NAMES.get(int(block["pred"]), "?"))
             if codec == "hevc":
                 self._row(cu, "depth", str(int(block["depth"])))
+            if aux is not None:
+                if aux[0] in (1, 2):          # intra: show sub_pdir mode
+                    self._row(cu, "intra mode",
+                              h264_intra_mode_name(aux[0], aux[1]))
+                self._row(cu, "slice id", str(aux[2]))
         else:
             self._row(cu, "type", "n/a (no partition data)")
 

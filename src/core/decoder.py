@@ -301,6 +301,11 @@ class Decoder:
             sc_index = self._index_to_display.get(frame_index, frame_index)
             if "blocks" in want and analysis.blocks is None:
                 analysis.blocks = self._block_sidecar.blocks_for(sc_index)
+                if analysis.codec in ("h264", "avc"):
+                    aux = self._block_sidecar.h264_aux_for(sc_index)
+                    if aux is not None:
+                        (analysis.h264_intra_type, analysis.h264_luma_mode,
+                         analysis.h264_slice) = aux
             if "pu" in want and analysis.pu is None:
                 analysis.pu = self._block_sidecar.pus_for(sc_index)
             if "tu_luma" in want and analysis.tu_luma is None:
