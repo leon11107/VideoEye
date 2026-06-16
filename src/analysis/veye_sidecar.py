@@ -1078,11 +1078,14 @@ def ctu_bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     bits summed over every CU in each CTB. One record per CTB. Empty for codecs
     without bit data.
 
-    cu_bits/pu_bits/tu_bits hold each CU's bits at its top-left cell (0
-    elsewhere), so block-summing the grid over a CTB's cells yields the CTB
-    total exactly.
+    cu_bits/pu_bits/tu_bits hold each CU's bits at its top-left cell. The bit
+    tables are reused across frames, so cells that are NOT a CU origin in this
+    frame may still hold a stale value from an earlier frame; we mask to this
+    frame's CU origins (via cu_log2, like bit_sizes_from_frame) before summing,
+    otherwise reordered P/B frames overcount.
     """
-    if (fb.codec_id != _CODEC_HEVC or fb.cu_bits is None or fb.ctb_size <= 0):
+    if (fb.codec_id != _CODEC_HEVC or fb.cu_bits is None or fb.ctb_size <= 0
+            or fb.cu_log2 is None):
         return np.empty(0, dtype=BITSIZE_DTYPE)
     unit = fb.block_unit
     ratio = max(1, fb.ctb_size // unit)     # min-CB cells per CTB side
@@ -1090,7 +1093,14 @@ def ctu_bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     cth = (gh + ratio - 1) // ratio
     ctw = (gw + ratio - 1) // ratio
 
+    cl = fb.cu_log2.astype(np.int32)
+    span = np.maximum(1, (1 << cl) // unit)
+    mx = np.arange(gw, dtype=np.int32)[None, :]
+    my = np.arange(gh, dtype=np.int32)[:, None]
+    origin = ((mx % span) == 0) & ((my % span) == 0)   # this frame's CU origins
+
     def block_sum(g: np.ndarray) -> np.ndarray:
+        g = np.where(origin, g, 0)
         gp = np.pad(g, ((0, cth * ratio - gh), (0, ctw * ratio - gw)))
         return gp.reshape(cth, ratio, ctw, ratio).sum(axis=(1, 3))
 
