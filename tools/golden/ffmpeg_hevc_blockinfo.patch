@@ -262,10 +262,10 @@ index 911d5c3..8df29c6 100644
      // CTB-level flags affecting loop filter operation
      uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..617f623 100644
+index 2d817c7..de4bcfa 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
-@@ -7,25 +7,36 @@
+@@ -7,25 +7,40 @@
  
  #include "libavutil/error.h"
  #include "libavutil/frame.h"
@@ -278,6 +278,7 @@ index 2d817c7..617f623 100644
  
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
++                             const int32_t *mb_bits,
 +                             int own_poc,
 +                             const int32_t *l0_poc, int nb_l0,
 +                             const int32_t *l1_poc, int nb_l1,
@@ -287,6 +288,7 @@ index 2d817c7..617f623 100644
      VeyeBlockInfoHeader *hdr;
      VeyeBlockRecord *rec;
 +    VeyeRefHeader *rh;
++    int32_t *bits;
      AVFrameSideData *sd;
      size_t n, size;
 -    int x, y;
@@ -298,13 +300,15 @@ index 2d817c7..617f623 100644
      n    = (size_t)grid_w * (size_t)grid_h;
 -    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecord);
 +    /* v5: a fixed-size reference section is appended after the records, mirroring
-+     * the HEVC layout, so the consumer can mark references on the frame chart. */
++     * the HEVC layout, so the consumer can mark references on the frame chart.
++     * v8: followed by 3*n int32 per-MB bit costs (total, prediction, transform);
++     * raster order, all zero when mb_bits is NULL. */
 +    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecord)
-+           + sizeof(VeyeRefHeader);
++           + sizeof(VeyeRefHeader) + 3 * n * sizeof(int32_t);
  
      sd = av_frame_new_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO, size);
      if (!sd)
-@@ -51,6 +62,20 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -51,6 +66,37 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
          }
      }
  
@@ -322,10 +326,27 @@ index 2d817c7..617f623 100644
 +        rh->l1_poc[i] = (l1_poc && i < nb_l1) ? l1_poc[i] : 0;
 +    }
 +
++    /* v8 bit section: per-MB total / prediction / transform bits. mb_bits is
++     * stored [xy*3 + k] with xy = x + y*grid_stride (same layout as mb_type). */
++    bits = (int32_t *)(sd->data + sizeof(VeyeBlockInfoHeader)
++                       + n * sizeof(VeyeBlockRecord) + sizeof(VeyeRefHeader));
++    if (mb_bits) {
++        for (y = 0; y < grid_h; y++)
++            for (x = 0; x < grid_w; x++) {
++                int xy = x + y * grid_stride;
++                int o  = (x + y * grid_w) * 3;
++                bits[o + 0] = mb_bits[xy * 3 + 0];
++                bits[o + 1] = mb_bits[xy * 3 + 1];
++                bits[o + 2] = mb_bits[xy * 3 + 2];
++            }
++    } else {
++        memset(bits, 0, 3 * n * sizeof(int32_t));
++    }
++
      return 0;
  }
  
-@@ -62,16 +87,43 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -62,16 +108,43 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
  
  /* Allocate the HEVC side data on @frame (or return the one already attached)
   * and (re)write its header. On a fresh allocation the records are zeroed. */
@@ -373,7 +394,7 @@ index 2d817c7..617f623 100644
  
      sd = av_frame_get_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO);
      if (sd && sd->size == size) {
-@@ -94,31 +146,59 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
+@@ -94,31 +167,59 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
      hdr->grid_w      = (uint32_t)min_cb_width;
      hdr->grid_h      = (uint32_t)min_cb_height;
      hdr->block_unit  = (uint32_t)(1 << log2_min_cb_size);
@@ -438,7 +459,7 @@ index 2d817c7..617f623 100644
  {
      VeyeBlockRecordHEVC *rec;
      AVFrameSideData *sd;
-@@ -129,7 +209,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -129,7 +230,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
          return 0;
  
      sd = veye_hevc_side_data(frame, min_cb_width, min_cb_height,
@@ -449,7 +470,7 @@ index 2d817c7..617f623 100644
      if (!sd)
          return AVERROR(ENOMEM);
  
-@@ -142,31 +224,275 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -142,31 +245,275 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -505,10 +526,10 @@ index 2d817c7..617f623 100644
 +            }
 +            rec->part_mode = tab_part_mode ? tab_part_mode[cb] : 0;
 +            rec->ct_depth  = (uint8_t)depth;  /* CU coding-tree depth (0=CTB) */
-             rec++;
-         }
-     }
- 
++            rec++;
++        }
++    }
++
 +    /* Append the luma TU-size grid (min-TB granularity), after the records
 +     * and the VeyeTuHeader that veye_hevc_side_data already wrote. */
 +    {
@@ -650,10 +671,10 @@ index 2d817c7..617f623 100644
 +                if (rf >= 1 && rf <= 7)
 +                    slot_used[rf - 1] = 1;
 +            }
-+            rec++;
-+        }
-+    }
-+
+             rec++;
+         }
+     }
+ 
 +    /* Reference section: own display order, plus used references split into
 +     * past (L0) and future (L1) by display order, de-duplicated. AV1 has no
 +     * L0/L1 lists, so this split is purely for the consumer's two-color
@@ -731,7 +752,7 @@ index 2d817c7..617f623 100644
      return 0;
  }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..c256469 100644
+index eadfb7b..fb48a5c 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,10 @@
@@ -739,7 +760,7 @@ index eadfb7b..c256469 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 7
++#define VEYE_BI_VERSION 8
 +
 +/* Max reference POCs recorded per list in the appended ref section. */
 +#define VEYE_MAX_REFS 16
@@ -876,17 +897,18 @@ index eadfb7b..c256469 100644
  /**
   * Serialize a per-cell grid into AV_FRAME_DATA_VEYE_BLOCKINFO side data and
   * attach it to @p frame. Reads are indexed with @p grid_stride; output is
-@@ -61,6 +175,9 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -61,6 +175,10 @@ typedef struct VeyeBlockRecordHEVC {
   */
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
++                             const int32_t *mb_bits,
 +                             int own_poc,
 +                             const int32_t *l0_poc, int nb_l0,
 +                             const int32_t *l1_poc, int nb_l1,
                               int grid_w, int grid_h, int grid_stride,
                               int block_unit);
  
-@@ -74,7 +191,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -74,7 +192,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
   * frame. Records are zero-initialized. Returns 0 on success/skip, ENOMEM else.
   */
  int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
@@ -899,7 +921,7 @@ index eadfb7b..c256469 100644
  
  /**
   * Serialize an HEVC min-CB grid into AV_FRAME_DATA_VEYE_BLOCKINFO. The HEVC
-@@ -83,26 +204,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+@@ -83,26 +205,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
   * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
   * one is already attached, otherwise allocates a fresh one.
   *

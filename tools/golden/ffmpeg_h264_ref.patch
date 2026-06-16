@@ -1,8 +1,62 @@
+diff --git a/libavcodec/h264_cabac.c b/libavcodec/h264_cabac.c
+index 703b27a..4ae1f3d 100644
+--- a/libavcodec/h264_cabac.c
++++ b/libavcodec/h264_cabac.c
+@@ -2433,6 +2433,10 @@ decode_intra_mb:
+             scan    = sl->qscale ? h->zigzag_scan : h->zigzag_scan_q0;
+         }
+ 
++        /* VEYE: residual coefficients begin here (after cbp / 8x8dct flag /
++         * mb_qp_delta), matching Elecard's "transform" bit accounting. */
++        sl->veye_pred_end_bits = veye_cabac_bits(&sl->cabac);
++
+         decode_cabac_luma_residual(h, sl, scan, scan8x8, pixel_shift, mb_type, cbp, 0);
+         if (CHROMA444(h)) {
+             decode_cabac_luma_residual(h, sl, scan, scan8x8, pixel_shift, mb_type, cbp, 1);
+diff --git a/libavcodec/h264_cavlc.c b/libavcodec/h264_cavlc.c
+index 75e5fb7..916580c 100644
+--- a/libavcodec/h264_cavlc.c
++++ b/libavcodec/h264_cavlc.c
+@@ -1096,6 +1096,10 @@ decode_intra_mb:
+             scan    = sl->qscale ? h->zigzag_scan : h->zigzag_scan_q0;
+         }
+ 
++        /* VEYE: residual coefficients begin here (after mb_qp_delta), matching
++         * Elecard's "transform" bit accounting. */
++        sl->veye_pred_end_bits = get_bits_count(&sl->gb);
++
+         if ((ret = decode_luma_residual(h, sl, gb, scan, scan8x8, pixel_shift, mb_type, cbp, 0)) < 0 ) {
+             return -1;
+         }
 diff --git a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
-index f5d2b31..19b2824 100644
+index f5d2b31..74656ac 100644
 --- a/libavcodec/h264_picture.c
 +++ b/libavcodec/h264_picture.c
-@@ -88,6 +88,9 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+@@ -50,6 +50,7 @@ void ff_h264_unref_picture(H264Picture *pic)
+ 
+     av_refstruct_unref(&pic->qscale_table_base);
+     av_refstruct_unref(&pic->mb_type_base);
++    av_refstruct_unref(&pic->veye_mb_bits_base);
+     av_refstruct_unref(&pic->pps);
+     for (i = 0; i < 2; i++) {
+         av_refstruct_unref(&pic->motion_val_base[i]);
+@@ -64,6 +65,7 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+ {
+     av_refstruct_replace(&dst->qscale_table_base, src->qscale_table_base);
+     av_refstruct_replace(&dst->mb_type_base,      src->mb_type_base);
++    av_refstruct_replace(&dst->veye_mb_bits_base, src->veye_mb_bits_base);
+     av_refstruct_replace(&dst->pps, src->pps);
+ 
+     for (int i = 0; i < 2; i++) {
+@@ -78,6 +80,7 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+ 
+     dst->qscale_table = src->qscale_table;
+     dst->mb_type      = src->mb_type;
++    dst->veye_mb_bits = src->veye_mb_bits;
+ 
+     for (int i = 0; i < 2; i++)
+         dst->motion_val[i] = src->motion_val[i];
+@@ -88,6 +91,9 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
      memcpy(dst->ref_poc,   src->ref_poc,   sizeof(src->ref_poc));
      memcpy(dst->ref_count, src->ref_count, sizeof(src->ref_count));
  
@@ -40,11 +94,105 @@ index 74840e5..1f32df8 100644
      return 0;
  }
  
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index 7e53e38..aa984e1 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -169,14 +169,18 @@ static int init_table_pools(H264Context *h)
+     h->qscale_table_pool = av_refstruct_pool_alloc(big_mb_num + h->mb_stride, 0);
+     h->mb_type_pool      = av_refstruct_pool_alloc((big_mb_num + h->mb_stride) *
+                                                    sizeof(uint32_t), 0);
++    /* VEYE: 3 int32 per MB (total / prediction / transform bit cost). */
++    h->veye_mb_bits_pool = av_refstruct_pool_alloc((big_mb_num + h->mb_stride) *
++                                                   3 * sizeof(int32_t), 0);
+     h->motion_val_pool   = av_refstruct_pool_alloc(2 * (b4_array_size + 4) *
+                                                    sizeof(int16_t), 0);
+     h->ref_index_pool    = av_refstruct_pool_alloc(4 * mb_array_size, 0);
+ 
+     if (!h->qscale_table_pool || !h->mb_type_pool || !h->motion_val_pool ||
+-        !h->ref_index_pool) {
++        !h->ref_index_pool || !h->veye_mb_bits_pool) {
+         av_refstruct_pool_uninit(&h->qscale_table_pool);
+         av_refstruct_pool_uninit(&h->mb_type_pool);
++        av_refstruct_pool_uninit(&h->veye_mb_bits_pool);
+         av_refstruct_pool_uninit(&h->motion_val_pool);
+         av_refstruct_pool_uninit(&h->ref_index_pool);
+         return AVERROR(ENOMEM);
+@@ -251,6 +255,11 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
+     pic->mb_type      = pic->mb_type_base + 2 * h->mb_stride + 1;
+     pic->qscale_table = pic->qscale_table_base + 2 * h->mb_stride + 1;
+ 
++    pic->veye_mb_bits_base = av_refstruct_pool_get(h->veye_mb_bits_pool);
++    if (!pic->veye_mb_bits_base)
++        goto fail;
++    pic->veye_mb_bits = pic->veye_mb_bits_base + (2 * h->mb_stride + 1) * 3;
++
+     for (i = 0; i < 2; i++) {
+         pic->motion_val_base[i] = av_refstruct_pool_get(h->motion_val_pool);
+         pic->ref_index[i]       = av_refstruct_pool_get(h->ref_index_pool);
+@@ -2613,7 +2622,23 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 return AVERROR_INVALIDDATA;
+             }
+ 
+-            ret = ff_h264_decode_mb_cabac(h, sl);
++            sl->veye_pred_end_bits = -1;
++            {
++                int veye_start = veye_cabac_bits(&sl->cabac);
++                ret = ff_h264_decode_mb_cabac(h, sl);
++                if (ret >= 0 && h->cur_pic.veye_mb_bits) {
++                    int veye_end = veye_cabac_bits(&sl->cabac);
++                    int mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
++                    int total = veye_end - veye_start;
++                    int trans = sl->veye_pred_end_bits >= 0
++                                ? veye_end - sl->veye_pred_end_bits : 0;
++                    if (trans < 0) trans = 0;
++                    if (trans > total) trans = total;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 0] = total;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 1] = total - trans;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 2] = trans;
++                }
++            }
+ 
+             if (ret >= 0)
+                 ff_h264_hl_decode_mb(h, sl);
+@@ -2684,7 +2709,23 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 return AVERROR_INVALIDDATA;
+             }
+ 
+-            ret = ff_h264_decode_mb_cavlc(h, sl);
++            sl->veye_pred_end_bits = -1;
++            {
++                int veye_start = get_bits_count(&sl->gb);
++                ret = ff_h264_decode_mb_cavlc(h, sl);
++                if (ret >= 0 && h->cur_pic.veye_mb_bits) {
++                    int veye_end = get_bits_count(&sl->gb);
++                    int mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
++                    int total = veye_end - veye_start;
++                    int trans = sl->veye_pred_end_bits >= 0
++                                ? veye_end - sl->veye_pred_end_bits : 0;
++                    if (trans < 0) trans = 0;
++                    if (trans > total) trans = total;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 0] = total;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 1] = total - trans;
++                    h->cur_pic.veye_mb_bits[mb_xy * 3 + 2] = trans;
++                }
++            }
+ 
+             if (ret >= 0)
+                 ff_h264_hl_decode_mb(h, sl);
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index ea51b37..f1ac1f9 100644
+index ea51b37..ed19d63 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
-@@ -972,9 +972,23 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+@@ -159,6 +159,7 @@ void ff_h264_free_tables(H264Context *h)
+ 
+     av_refstruct_pool_uninit(&h->qscale_table_pool);
+     av_refstruct_pool_uninit(&h->mb_type_pool);
++    av_refstruct_pool_uninit(&h->veye_mb_bits_pool);
+     av_refstruct_pool_uninit(&h->motion_val_pool);
+     av_refstruct_pool_uninit(&h->ref_index_pool);
+ 
+@@ -972,9 +973,24 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
                                   out->mb_width, out->mb_height, out->mb_stride, 1);
          }
  
@@ -64,6 +212,7 @@ index ea51b37..f1ac1f9 100644
 +                l1_poc[vi] = out->veye_ref_poc[1][vi];
 +            ff_veye_export_blockinfo(dst, AV_CODEC_ID_H264,
 +                                     out->mb_type, out->qscale_table,
++                                     out->veye_mb_bits,
 +                                     out->poc, l0_poc, nb_l0, l1_poc, nb_l1,
 +                                     out->mb_width, out->mb_height,
 +                                     out->mb_stride, 16);
@@ -72,10 +221,38 @@ index ea51b37..f1ac1f9 100644
  
      return 0;
 diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
-index 1df9901..f391ee9 100644
+index 1df9901..da5ca1d 100644
 --- a/libavcodec/h264dec.h
 +++ b/libavcodec/h264dec.h
-@@ -141,6 +141,8 @@ typedef struct H264Picture {
+@@ -46,6 +46,15 @@
+ #include "threadframe.h"
+ #include "videodsp.h"
+ 
++/* VEYE: exact CABAC bit position. The arithmetic decoder buffers up-to-16
++ * look-ahead bits in cc.low; subtract them from the consumed bytestream. */
++static av_always_inline av_unused int veye_cabac_bits(const CABACContext *c)
++{
++    int lo = c->low & 0xFFFF;
++    int buffered = lo ? (16 - ff_ctz(lo)) : 0;
++    return (int)(c->bytestream - c->bytestream_start) * 8 - buffered;
++}
++
+ #define H264_MAX_PICTURE_COUNT 36
+ 
+ /* Compiling in interlaced support reduces the speed
+@@ -126,6 +135,11 @@ typedef struct H264Picture {
+     uint32_t *mb_type_base;           ///< RefStruct reference
+     uint32_t *mb_type;
+ 
++    /// VEYE: per-MB coded bit cost, 3 int32 per MB (total, prediction,
++    /// transform). Indexed [mb_xy * 3 + k], same base offset as mb_type.
++    int32_t *veye_mb_bits_base;       ///< RefStruct reference
++    int32_t *veye_mb_bits;
++
+     /// RefStruct reference for hardware accelerator private data
+     void *hwaccel_picture_private;
+ 
+@@ -141,6 +155,8 @@ typedef struct H264Picture {
      int long_ref;           ///< 1->long term reference 0->short term reference
      int ref_poc[2][2][32];  ///< POCs of the frames/fields used as reference (FIXME need per slice)
      int ref_count[2][2];    ///< number of entries in ref_poc         (FIXME need per slice)
@@ -84,3 +261,23 @@ index 1df9901..f391ee9 100644
      int mbaff;              ///< 1 -> MBAFF frame 0-> not MBAFF
      int field_picture;      ///< whether or not picture was encoded in separate fields
  
+@@ -321,6 +337,11 @@ typedef struct H264SliceContext {
+     uint8_t cabac_state[1024];
+     int cabac_init_idc;
+ 
++    /// VEYE: bit position (veye_cabac_bits / get_bits_count) at the end of the
++    /// current MB's prediction syntax, set inside the MB decoder; -1 if the MB
++    /// has no residual section (skip / PCM). Read by the slice loop.
++    int veye_pred_end_bits;
++
+     MMCO mmco[H264_MAX_MMCO_COUNT];
+     int  nb_mmco;
+     int explicit_ref_marking;
+@@ -572,6 +593,7 @@ typedef struct H264Context {
+ 
+     struct AVRefStructPool *qscale_table_pool;
+     struct AVRefStructPool *mb_type_pool;
++    struct AVRefStructPool *veye_mb_bits_pool;   ///< VEYE: 3 int32 per MB
+     struct AVRefStructPool *motion_val_pool;
+     struct AVRefStructPool *ref_index_pool;
+     struct AVRefStructPool *decode_error_flags_pool;

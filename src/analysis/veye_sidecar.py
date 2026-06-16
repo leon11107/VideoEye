@@ -155,6 +155,11 @@ class VeyeFrameBlocks:
     mode: Optional[np.ndarray] = None       # AV1: PREDICTION_MODE per cell
     skip: Optional[np.ndarray] = None       # AV1: skip_txfm flag per cell
     tx_size: Optional[np.ndarray] = None    # AV1: TX_SIZE per cell
+    # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
+    # each (grid_h, grid_w) int32.
+    mb_total_bits: Optional[np.ndarray] = None
+    mb_pred_bits: Optional[np.ndarray] = None
+    mb_trans_bits: Optional[np.ndarray] = None
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -406,6 +411,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
     own_poc = None
     ref_l0: tuple = ()
     ref_l1: tuple = ()
+    mb_total = mb_pred = mb_trans = None
     if _ver >= 5:
         ref_off = _BLK_HDR.size + n_records * _REC.itemsize
         if len(payload) >= ref_off + _REF_HDR.size:
@@ -416,11 +422,22 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             l1 = vals[3 + _MAX_REFS:3 + 2 * _MAX_REFS]
             ref_l0 = tuple(l0[:max(0, nb_l0)])
             ref_l1 = tuple(l1[:max(0, nb_l1)])
+        # v8: 3*n int32 per-MB bit costs (total, prediction, transform) after
+        # the ref section, raster order.
+        if _ver >= 8:
+            bits_off = ref_off + _REF_HDR.size
+            if len(payload) >= bits_off + 3 * n_records * 4:
+                bg = np.frombuffer(payload, dtype="<i4", count=3 * n_records,
+                                   offset=bits_off).reshape(grid_h, grid_w, 3)
+                mb_total = bg[..., 0].copy()
+                mb_pred = bg[..., 1].copy()
+                mb_trans = bg[..., 2].copy()
     return VeyeFrameBlocks(
         codec_id, grid_w, grid_h, block_unit,
         qp=recs["qp"].reshape(grid_h, grid_w).copy(),
         mb_type=recs["mb_type"].reshape(grid_h, grid_w).copy(),
         own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
+        mb_total_bits=mb_total, mb_pred_bits=mb_pred, mb_trans_bits=mb_trans,
     )
 
 
@@ -871,6 +888,8 @@ def bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Per-CU coded bit cost (BITSIZE_DTYPE) for the HEVC Bit Size heatmap.
     One record per CU (emitted at the CU's top-left cell), carrying total /
     prediction / residual bits. Empty for codecs without bit data."""
+    if fb.codec_id == _CODEC_H264:
+        return _bit_sizes_from_h264(fb)
     if (fb.codec_id != _CODEC_HEVC or fb.cu_log2 is None
             or fb.cu_bits is None):
         return np.empty(0, dtype=BITSIZE_DTYPE)
@@ -893,6 +912,27 @@ def bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     out["cu"] = fb.cu_bits[ys, xs]
     out["pu"] = fb.pu_bits[ys, xs]
     out["tu"] = fb.tu_bits[ys, xs]
+    return out
+
+
+def _bit_sizes_from_h264(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Per-MB coded bit cost (BITSIZE_DTYPE) for H.264: one 16x16 record per
+    macroblock carrying total / prediction / transform bits. Empty if the
+    sidecar predates the v8 bit section."""
+    if fb.mb_total_bits is None:
+        return np.empty(0, dtype=BITSIZE_DTYPE)
+    unit = fb.block_unit
+    gh, gw = fb.mb_total_bits.shape
+    mx = np.arange(gw, dtype=np.int32)[None, :].repeat(gh, axis=0)
+    my = np.arange(gh, dtype=np.int32)[:, None].repeat(gw, axis=1)
+    out = np.empty(gh * gw, dtype=BITSIZE_DTYPE)
+    out["x"] = (mx * unit).ravel()
+    out["y"] = (my * unit).ravel()
+    out["w"] = unit
+    out["h"] = unit
+    out["cu"] = fb.mb_total_bits.ravel()
+    out["pu"] = fb.mb_pred_bits.ravel()
+    out["tu"] = fb.mb_trans_bits.ravel()
     return out
 
 

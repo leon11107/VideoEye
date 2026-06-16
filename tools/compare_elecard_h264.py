@@ -14,6 +14,7 @@ import numpy as np
 sys.path.insert(0, ".")
 from src.analysis.veye_sidecar import (
     load_sidecar, blocks_from_frame, pus_from_frame, mvs_from_frame,
+    bit_sizes_from_frame,
 )
 from src.analysis.schema import PredType
 
@@ -91,5 +92,21 @@ def csv_pred(t):
 pc_ok = sum(1 for loc in common
             if csv_pred(mbs[loc].get("type", "")) == int(ours[loc]["pred"]))
 print(f"prediction-class match: {pc_ok}/{len(common)}")
-print("\nMISSING in ours: MB bit sizes, detailed MB type, intra mode (sub_pdir),"
-      " per-MB slice id")
+
+# per-MB bit cost: total + transform should be bit-exact (prediction = total -
+# transform by our definition, so it is not compared against Elecard's narrower
+# prediction count).
+ob = {(int(r["x"]), int(r["y"])): r for r in bit_sizes_from_frame(fb)}
+tot_ok = tr_ok = bn = 0
+for loc in common:
+    r = ob.get(loc)
+    if r is None or "total" not in mbs[loc]:
+        continue
+    bn += 1
+    tot_ok += int(r["cu"]) == mbs[loc]["total"]
+    tr_ok += int(r["tu"]) == mbs[loc]["trans"]
+print(f"per-MB total bits match:     {tot_ok}/{bn}")
+print(f"per-MB transform bits match: {tr_ok}/{bn}")
+print("NOTE: prediction = total - transform by our definition (includes the MB"
+      " header), so it is not expected to match Elecard's narrower prediction.")
+print("Still missing: detailed MB type, intra mode (sub_pdir), per-MB slice id")
