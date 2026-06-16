@@ -302,11 +302,14 @@ class BlockHoverPanel(QWidget):
                 _kv_row(size, "prediction", str(int(ctu_bits["pu"])))
                 _kv_row(size, "transform", str(int(ctu_bits["tu"])))
 
+        intra_rec = info.get("intra_rec")     # H.264: exact sub-block at cursor
+        iw = int(intra_rec["w"]) if intra_rec is not None else 0
         title = "Macroblock" if codec in ("h264", "avc") else "Coded Unit"
         cu = self._section(title)
         if block is not None:
             if aux is not None:
-                self._row(cu, "type", h264_mb_type_label(aux[0], int(block["pred"])))
+                self._row(cu, "type",
+                          h264_mb_type_label(aux[0], int(block["pred"]), iw))
             else:
                 self._row(cu, "type", block_type_label(codec, int(block["mode"])))
             self._row(cu, "dimensions", f"{int(block['w'])}x{int(block['h'])}")
@@ -315,7 +318,13 @@ class BlockHoverPanel(QWidget):
             if codec == "hevc":
                 self._row(cu, "depth", str(int(block["depth"])))
             if aux is not None:
-                if aux[0] in (1, 2):          # intra: show sub_pdir mode
+                if intra_rec is not None:     # exact 4x4/8x8/16x16 sub-block mode
+                    it = 2 if iw == 16 else 1
+                    self._row(cu, "intra mode",
+                              h264_intra_mode_name(it, int(intra_rec["mode"])))
+                    if iw and iw != int(block["w"]):
+                        self._row(cu, "intra block", f"{iw}x{iw}")
+                elif aux[0] in (1, 2):
                     self._row(cu, "intra mode",
                               h264_intra_mode_name(aux[0], aux[1]))
                 self._row(cu, "slice id", str(aux[2]))

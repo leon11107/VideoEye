@@ -220,6 +220,22 @@ class FrameAnalysis:
             return None
         return row * len(self.tile_col_bd) + col
 
+    def intra_at(self, px: int, py: int):
+        """Intra-prediction record (INTRA_DTYPE) covering pixel (px, py), or
+        None. The smallest covering block wins (most specific sub-block)."""
+        if self.intra is None or len(self.intra) == 0 or px < 0 or py < 0:
+            return None
+        a = self.intra
+        mask = (
+            (a["x"] <= px) & (px < a["x"] + a["w"])
+            & (a["y"] <= py) & (py < a["y"] + a["h"])
+        )
+        hits = a[mask]
+        if len(hits) == 0:
+            return None
+        areas = hits["w"].astype(np.int32) * hits["h"].astype(np.int32)
+        return hits[int(np.argmin(areas))]
+
     def h264_aux_at(self, px: int, py: int):
         """H.264 (intra_type, luma_mode, slice_id) at pixel (px, py), or None."""
         if self.h264_intra_type is None or px < 0 or py < 0:

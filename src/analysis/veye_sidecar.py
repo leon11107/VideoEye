@@ -107,6 +107,7 @@ MB_TYPE_P1L0 = 1 << 13
 MB_TYPE_P0L1 = 1 << 14
 MB_TYPE_P1L1 = 1 << 15
 MB_TYPE_SKIP = 1 << 17
+MB_TYPE_8x8DCT = 1 << 24      # transform_size_8x8_flag (I_NxN -> I_8x8)
 
 _MB_TYPE_INTRA = MB_TYPE_INTRA4x4 | MB_TYPE_INTRA16x16 | MB_TYPE_INTRA_PCM
 _MB_TYPE_L0 = MB_TYPE_P0L0 | MB_TYPE_P1L0
@@ -170,6 +171,9 @@ class VeyeFrameBlocks:
     # mb_ref shape (grid_h, grid_w, 4, 2) int8 = [ref0, ref1].
     mb_mv: Optional[np.ndarray] = None
     mb_ref: Optional[np.ndarray] = None
+    # H.264 per-4x4 luma intra mode (v11): (grid_h, grid_w, 16) int8, canonical
+    # mode of each 4x4 luma block in H.264 block scan order (-1 if not intra).
+    mb_luma_mode4: Optional[np.ndarray] = None
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -423,6 +427,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
     ref_l1: tuple = ()
     mb_total = mb_pred = mb_trans = None
     mb_itype = mb_lmode = mb_slice = None
+    mb_mv = mb_ref = mb_lmode4 = None
     if _ver >= 5:
         ref_off = _BLK_HDR.size + n_records * _REC.itemsize
         if len(payload) >= ref_off + _REF_HDR.size:
@@ -469,6 +474,14 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                                         offset=mv_off + nmv * 2)
                     mb_mv = mvb.reshape(grid_h, grid_w, 4, 4).copy()
                     mb_ref = rfb.reshape(grid_h, grid_w, 4, 2).copy()
+            # v11: per-4x4 luma intra modes (16/MB, scan order).
+            if _ver >= 11:
+                md_off = (bits_off + 3 * n_records * 4 + n_records * 4
+                          + n_records * 4 * 4 * 2 + n_records * 4 * 2)
+                if len(payload) >= md_off + n_records * 16:
+                    mdb = np.frombuffer(payload, dtype="<i1",
+                                        count=n_records * 16, offset=md_off)
+                    mb_lmode4 = mdb.reshape(grid_h, grid_w, 16).copy()
     return VeyeFrameBlocks(
         codec_id, grid_w, grid_h, block_unit,
         qp=recs["qp"].reshape(grid_h, grid_w).copy(),
@@ -476,7 +489,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
         mb_total_bits=mb_total, mb_pred_bits=mb_pred, mb_trans_bits=mb_trans,
         mb_intra_type=mb_itype, mb_luma_mode=mb_lmode, mb_slice_id=mb_slice,
-        mb_mv=mb_mv, mb_ref=mb_ref,
+        mb_mv=mb_mv, mb_ref=mb_ref, mb_luma_mode4=mb_lmode4,
     )
 
 
@@ -809,7 +822,62 @@ def intra_modes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
         return _intra_from_hevc(fb)
     if fb.codec_id == _CODEC_AV1:
         return _intra_from_av1(fb)
+    if fb.codec_id == _CODEC_H264:
+        return _intra_from_h264(fb)
     return np.empty(0, dtype=INTRA_DTYPE)
+
+
+# H.264 luma 4x4 block scan index -> (x4, y4) position within the MB.
+_H264_BLK_SCAN = tuple(
+    (((i >> 2) & 1) * 2 + (i & 1), ((i >> 2) >> 1) * 2 + ((i & 3) >> 1))
+    for i in range(16)
+)
+
+
+def _h264_intra_cat(mode: int, is16: bool) -> int:
+    """Map a canonical H.264 luma intra mode to an INTRA_* category."""
+    if mode == 2:
+        return INTRA_DC
+    if is16 and mode == 3:
+        return INTRA_PLANE          # I_16x16 mode 3 is Plane
+    return INTRA_ANGULAR
+
+
+def _intra_from_h264(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Intra-prediction records for an H.264 frame from the per-4x4 mode grid
+    (v11). One record per coding block: I_16x16 -> one 16x16, I_8x8 -> four 8x8,
+    I_4x4 -> sixteen 4x4. mode is the canonical luma intra mode."""
+    if fb.mb_intra_type is None or fb.mb_luma_mode4 is None or fb.mb_type is None:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    unit = fb.block_unit
+    it = fb.mb_intra_type
+    md = fb.mb_luma_mode4
+    mt = fb.mb_type
+    ys, xs = np.nonzero(it > 0)
+    out = []
+    for r, c in zip(ys.tolist(), xs.tolist()):
+        t = int(it[r, c])
+        if t == 3:                  # PCM: no prediction direction
+            continue
+        bx, by = c * unit, r * unit
+        if t == 2:                  # I_16x16
+            m = int(md[r, c, 0])
+            out.append((bx, by, 16, 16, m, _h264_intra_cat(m, True)))
+        elif int(mt[r, c]) & MB_TYPE_8x8DCT:    # I_8x8: 4 blocks
+            for blk8 in range(4):
+                m = int(md[r, c, blk8 * 4])
+                px, py = (blk8 & 1) * 8, (blk8 >> 1) * 8
+                out.append((bx + px, by + py, 8, 8, m,
+                            _h264_intra_cat(m, False)))
+        else:                       # I_4x4: 16 blocks
+            for i in range(16):
+                m = int(md[r, c, i])
+                x4, y4 = _H264_BLK_SCAN[i]
+                out.append((bx + x4 * 4, by + y4 * 4, 4, 4, m,
+                            _h264_intra_cat(m, False)))
+    if not out:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    return np.array(out, dtype=INTRA_DTYPE)
 
 
 def _intra_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:

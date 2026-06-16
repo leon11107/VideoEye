@@ -16,7 +16,7 @@ import numpy as np
 sys.path.insert(0, ".")
 from src.analysis.veye_sidecar import (
     load_sidecar, blocks_from_frame, bit_sizes_from_frame, qp_grid_from_frame,
-    mvs_from_frame,
+    mvs_from_frame, _H264_BLK_SCAN,
 )
 from src.analysis.schema import PredType
 
@@ -129,12 +129,26 @@ for loc in common:
         pc += 1
     else:
         pc_miss[c.get("type", "?")] += 1
-    # intra mode: compare our representative to Elecard's FIRST sub_pdir
-    if c.get("type", "").startswith("I_") and c["sub"]:
-        sp = c["sub"][0]
-        if sp in SUBP:
+    # intra mode: compare ALL Elecard sub_pdir entries to our per-4x4 mode grid
+    # (v11), mapped to the same H.264 4x4 block scan order Elecard uses.
+    if c.get("type", "").startswith("I_") and c["sub"] and fb.mb_luma_mode4 is not None:
+        subs = [s for s in c["sub"] if s in SUBP]
+        ours16 = fb.mb_luma_mode4[row, col]      # 16 modes, H.264 block-scan
+        if len(subs) == 16:                      # I_4x4: Elecard is raster order
+            raster = [0] * 16
+            for i in range(16):
+                x4, y4 = _H264_BLK_SCAN[i]
+                raster[y4 * 4 + x4] = int(ours16[i])
+            for k, sp in enumerate(subs):
+                imn += 1
+                im += raster[k] == SUBP[sp]
+        elif len(subs) == 4:                     # I_8x8: per-8x8 (block k*4)
+            for k, sp in enumerate(subs):
+                imn += 1
+                im += int(ours16[k * 4]) == SUBP[sp]
+        elif len(subs) == 1:                     # I_16x16
             imn += 1
-            im += int(fb.mb_luma_mode[row, col]) == SUBP[sp]
+            im += int(ours16[0]) == SUBP[subs[0]]
 
 n = len(common)
 print(f"total bits   match: {tot}/{n}")
@@ -144,7 +158,7 @@ print(f"slice id     match: {sl}/{n}")
 print(f"pred-class   match: {pc}/{n}")
 if pc_miss:
     print(f"  pred-class mismatches by Elecard type: {dict(pc_miss)}")
-print(f"intra mode (1st sub) match: {im}/{imn}")
+print(f"intra mode (all sub-blocks) match: {im}/{imn}")
 
 # motion vectors: every Elecard partition MV (per list) must appear among our
 # 4 quadrant MVs for that MB (1/4-pel raw units).

@@ -57,15 +57,16 @@ def h264_intra_mode_name(intra_type: int, mode: int) -> str:
     return "n/a"
 
 
-def h264_mb_type_label(intra_type: int, pred: int) -> str:
+def h264_mb_type_label(intra_type: int, pred: int, intra_w: int = 0) -> str:
     """Short H.264 macroblock type label (PredType in pred; intra_type refines
-    the intra family)."""
+    the intra family). intra_w (the covering intra block width) separates
+    I_8x8 from I_4x4 when known."""
     if intra_type == 3:
         return "I_PCM"
     if intra_type == 2:
         return "I_16x16"
     if intra_type == 1:
-        return "I_NxN"
+        return "I_8x8" if intra_w == 8 else "I_4x4" if intra_w == 4 else "I_NxN"
     # inter families come from the prediction class
     from .schema import PredType
     return {PredType.SKIP: "P_Skip", PredType.INTER: "P/B inter",

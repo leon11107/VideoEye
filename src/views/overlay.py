@@ -261,8 +261,21 @@ def _av1_intra_dirs() -> np.ndarray:
     return table
 
 
+def _h264_intra_dirs() -> np.ndarray:
+    """Unit direction per canonical H.264 luma intra mode 0..8 (0 for DC).
+    0 Vertical, 1 Horizontal, 3 Diag-DL, 4 Diag-DR, 5 Vert-Right, 6 Hor-Down,
+    7 Vert-Left, 8 Hor-Up. Orientation only (90=up, 180=left)."""
+    deg = {0: 90, 1: 180, 3: 45, 4: 135, 5: 112, 6: 157, 7: 67, 8: 22}
+    table = np.zeros((9, 2), dtype=np.float32)
+    for m, d in deg.items():
+        r = math.radians(d)
+        table[m] = (math.cos(r), -math.sin(r))
+    return table
+
+
 _HEVC_INTRA_DIRS = _hevc_intra_dirs()
 _AV1_INTRA_DIRS = _av1_intra_dirs()
+_H264_INTRA_DIRS = _h264_intra_dirs()
 
 
 def _intra_dir_table(codec: str) -> np.ndarray:
@@ -270,6 +283,8 @@ def _intra_dir_table(codec: str) -> np.ndarray:
         return _HEVC_INTRA_DIRS
     if codec == "av1":
         return _AV1_INTRA_DIRS
+    if codec in ("h264", "avc"):
+        return _H264_INTRA_DIRS
     return np.zeros((1, 2), dtype=np.float32)
 
 
