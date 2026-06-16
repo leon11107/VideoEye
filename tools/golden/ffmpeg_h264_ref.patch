@@ -232,7 +232,7 @@ index 7e53e38..213fe7f 100644
              if (ret >= 0)
                  ff_h264_hl_decode_mb(h, sl);
 diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
-index ea51b37..ed19d63 100644
+index ea51b37..a018d31 100644
 --- a/libavcodec/h264dec.c
 +++ b/libavcodec/h264dec.c
 @@ -159,6 +159,7 @@ void ff_h264_free_tables(H264Context *h)
@@ -243,7 +243,7 @@ index ea51b37..ed19d63 100644
      av_refstruct_pool_uninit(&h->motion_val_pool);
      av_refstruct_pool_uninit(&h->ref_index_pool);
  
-@@ -972,9 +973,24 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+@@ -972,9 +973,25 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
                                   out->mb_width, out->mb_height, out->mb_stride, 1);
          }
  
@@ -264,6 +264,7 @@ index ea51b37..ed19d63 100644
 +            ff_veye_export_blockinfo(dst, AV_CODEC_ID_H264,
 +                                     out->mb_type, out->qscale_table,
 +                                     out->veye_mb_bits,
++                                     out->motion_val, out->ref_index,
 +                                     out->poc, l0_poc, nb_l0, l1_poc, nb_l1,
 +                                     out->mb_width, out->mb_height,
 +                                     out->mb_stride, 16);

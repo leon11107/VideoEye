@@ -110,7 +110,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v12"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v13"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"

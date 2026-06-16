@@ -69,6 +69,12 @@ def parse(path):
                 mbs[cur]["sub"].append(val.strip())
             elif name == "MB sub_pmode":
                 mbs[cur]["sub"].append(val.strip())
+            elif name.startswith("MB mv[0]"):
+                a = val.split("/")[0].split(",")     # mvx, mvy, ref
+                mbs[cur].setdefault("mv0", []).append((int(a[0]), int(a[1])))
+            elif name.startswith("MB mv[1]"):
+                a = val.split("/")[0].split(",")
+                mbs[cur].setdefault("mv1", []).append((int(a[0]), int(a[1])))
     return mbs
 
 
@@ -140,11 +146,25 @@ if pc_miss:
     print(f"  pred-class mismatches by Elecard type: {dict(pc_miss)}")
 print(f"intra mode (1st sub) match: {im}/{imn}")
 
+# motion vectors: every Elecard partition MV (per list) must appear among our
+# 4 quadrant MVs for that MB (1/4-pel raw units).
+if fb.mb_mv is not None:
+    mv0_ok = mv0_n = mv1_ok = mv1_n = 0
+    for loc in common:
+        c = mbs[loc]
+        col, row = loc[0] // unit, loc[1] // unit
+        q = fb.mb_mv[row, col]
+        our0 = {(int(q[k, 0]), int(q[k, 1])) for k in range(4)}
+        our1 = {(int(q[k, 2]), int(q[k, 3])) for k in range(4)}
+        for e in c.get("mv0", []):
+            mv0_n += 1; mv0_ok += e in our0
+        for e in c.get("mv1", []):
+            mv1_n += 1; mv1_ok += e in our1
+    print(f"MV L0 match: {mv0_ok}/{mv0_n}   MV L1 match: {mv1_ok}/{mv1_n}")
+
 # gaps
-n_mv = sum(1 for m in mbs.values() if any("L" in s for s in m["sub"]))
-print(f"\n-- gaps to judge --")
-print(f"Elecard MBs with inter partitions (have MV/MVD): {n_mv}; "
-      f"our sidecar MVs this frame: {len(mvs_from_frame(fb))}")
 multi = sum(1 for m in mbs.values() if len(m["sub"]) > 1)
+print(f"\n-- remaining gaps to judge --")
 print(f"Elecard MBs with >1 sub-partition (per-sub modes/dims): {multi} "
-      f"(we export one representative mode + MB-level 16x16 dimension)")
+      f"(we export one representative intra mode + MB-level 16x16 dimension; "
+      f"MVs are exported at 8x8-quadrant granularity)")

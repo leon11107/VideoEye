@@ -165,6 +165,11 @@ class VeyeFrameBlocks:
     mb_intra_type: Optional[np.ndarray] = None
     mb_luma_mode: Optional[np.ndarray] = None
     mb_slice_id: Optional[np.ndarray] = None
+    # H.264 per-MB MV (v10): 4 8x8 quadrants per MB. mb_mv shape
+    # (grid_h, grid_w, 4, 4) int16 = [mv0_x, mv0_y, mv1_x, mv1_y] (1/4-pel);
+    # mb_ref shape (grid_h, grid_w, 4, 2) int8 = [ref0, ref1].
+    mb_mv: Optional[np.ndarray] = None
+    mb_ref: Optional[np.ndarray] = None
 
 
 def load_sidecar(path: str) -> Optional[dict[int, VeyeFrameBlocks]]:
@@ -451,6 +456,19 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                     mb_itype = it.reshape(grid_h, grid_w).copy()
                     mb_lmode = lm.reshape(grid_h, grid_w).copy()
                     mb_slice = sid.reshape(grid_h, grid_w).copy()
+            # v10 MV: per MB, 4 quadrants of [mv0x,mv0y,mv1x,mv1y] int16 then
+            # [ref0,ref1] int8.
+            if _ver >= 10:
+                mv_off = bits_off + 3 * n_records * 4 + n_records * 4
+                nmv = n_records * 4 * 4
+                nref = n_records * 4 * 2
+                if len(payload) >= mv_off + nmv * 2 + nref:
+                    mvb = np.frombuffer(payload, dtype="<i2", count=nmv,
+                                        offset=mv_off)
+                    rfb = np.frombuffer(payload, dtype="<i1", count=nref,
+                                        offset=mv_off + nmv * 2)
+                    mb_mv = mvb.reshape(grid_h, grid_w, 4, 4).copy()
+                    mb_ref = rfb.reshape(grid_h, grid_w, 4, 2).copy()
     return VeyeFrameBlocks(
         codec_id, grid_w, grid_h, block_unit,
         qp=recs["qp"].reshape(grid_h, grid_w).copy(),
@@ -458,6 +476,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
         mb_total_bits=mb_total, mb_pred_bits=mb_pred, mb_trans_bits=mb_trans,
         mb_intra_type=mb_itype, mb_luma_mode=mb_lmode, mb_slice_id=mb_slice,
+        mb_mv=mb_mv, mb_ref=mb_ref,
     )
 
 
@@ -1048,7 +1067,55 @@ def mvs_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     """Motion vectors (MV_DTYPE) for one frame, one per prediction region."""
     if fb.codec_id == _CODEC_AV1:
         return _mvs_from_av1(fb)
+    if fb.codec_id == _CODEC_H264:
+        return _mvs_from_h264(fb)
     return _mvs_from_hevc(fb)
+
+
+def _mvs_from_h264(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Motion vectors for an H.264 frame from the per-MB 8x8-quadrant MV grid
+    (v10). A list is emitted for a MB only when its mb_type carries that list
+    flag (intra MBs emit nothing); within a MB, quadrants whose ref == -1 are
+    skipped (mixed B partitions). Quadrants with an identical MV across the MB
+    collapse to one 16x16 record so a 16x16 partition draws one arrow, not four.
+    Vectors are 1/4-pel -> pixels.
+
+    ref_index is only reliable as a -1 (not-used) marker; ref 0 appears on intra
+    and P-frame list 1 too, so list usage is gated on mb_type, not ref."""
+    if fb.mb_mv is None or fb.mb_ref is None or fb.mb_type is None:
+        return np.empty(0, dtype=MV_DTYPE)
+    unit = fb.block_unit                       # 16
+    half = unit // 2                           # 8x8 quadrant size
+    gh, gw = fb.mb_mv.shape[:2]
+    out = []
+    for row in range(gh):
+        for col in range(gw):
+            t = int(fb.mb_type[row, col])
+            if t & _MB_TYPE_INTRA:             # intra MB: no motion
+                continue
+            mv = fb.mb_mv[row, col]            # (4, 4)
+            rf = fb.mb_ref[row, col]           # (4, 2)
+            bx, by = col * unit, row * unit
+            for lst in (0, 1):
+                if not (t & (_MB_TYPE_L0 if lst == 0 else _MB_TYPE_L1)):
+                    continue
+                used = [q for q in range(4) if int(rf[q, lst]) != -1]
+                if not used:
+                    continue
+                vecs = {q: (int(mv[q, lst * 2]), int(mv[q, lst * 2 + 1]))
+                        for q in used}
+                if len(used) == 4 and len(set(vecs.values())) == 1:
+                    vx, vy = vecs[0]
+                    out.append((bx, by, unit, unit, lst, vx / 4.0, vy / 4.0))
+                else:
+                    for q in used:
+                        vx, vy = vecs[q]
+                        qx, qy = (q & 1) * half, (q >> 1) * half
+                        out.append((bx + qx, by + qy, half, half, lst,
+                                    vx / 4.0, vy / 4.0))
+    if not out:
+        return np.empty(0, dtype=MV_DTYPE)
+    return np.array(out, dtype=MV_DTYPE)
 
 
 def _mvs_from_av1(fb: VeyeFrameBlocks) -> np.ndarray:

@@ -262,10 +262,10 @@ index 911d5c3..8df29c6 100644
      // CTB-level flags affecting loop filter operation
      uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..c4fb8a7 100644
+index 2d817c7..7d8f4db 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
-@@ -7,25 +7,43 @@
+@@ -7,25 +7,48 @@
  
  #include "libavutil/error.h"
  #include "libavutil/frame.h"
@@ -279,6 +279,8 @@ index 2d817c7..c4fb8a7 100644
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
 +                             const int32_t *mb_bits,
++                             int16_t (*const motion_val[2])[2],
++                             const int8_t *const ref_index[2],
 +                             int own_poc,
 +                             const int32_t *l0_poc, int nb_l0,
 +                             const int32_t *l1_poc, int nb_l1,
@@ -304,14 +306,17 @@ index 2d817c7..c4fb8a7 100644
 +     * v8: followed by 3*n int32 per-MB bit costs (total, prediction, transform);
 +     * raster order, all zero when mb_bits is NULL.
 +     * v9: followed by an aux section -- n int8 intra type, n int8 luma intra
-+     * mode, n int16 slice id. mb_bits is read with stride VEYE_H264_MB_STRIDE. */
++     * mode, n int16 slice id. mb_bits is read with stride VEYE_H264_MB_STRIDE.
++     * v10: followed by an MV section -- per MB, 4 8x8 quadrants each carrying
++     * mv0_x,mv0_y,mv1_x,mv1_y (int16, 1/4-pel) then ref0,ref1 (int8). */
 +    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecord)
 +           + sizeof(VeyeRefHeader) + 3 * n * sizeof(int32_t)
-+           + n * (1 + 1 + 2);
++           + n * (1 + 1 + 2)
++           + n * 4 * (4 * sizeof(int16_t) + 2 * sizeof(int8_t));
  
      sd = av_frame_new_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO, size);
      if (!sd)
-@@ -51,6 +69,48 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -51,6 +74,83 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
          }
      }
  
@@ -355,12 +360,47 @@ index 2d817c7..c4fb8a7 100644
 +            memset(bits, 0, 3 * n * sizeof(int32_t));
 +            memset(aux_type, 0, n * (1 + 1 + 2));
 +        }
++
++        /* v10 MV section: 4 quadrants/MB, each (mv0,mv1) int16 + (ref0,ref1)
++         * int8. Quadrant q's representative 4x4 block (h264 motion_val is
++         * per-4x4, 1/4-pel; mv_stride = grid_w*4). */
++        {
++            int16_t *mv = (int16_t *)(aux_slice + n);
++            int8_t  *rf = (int8_t *)(mv + n * 4 * 4);
++            int mv_stride = grid_w * 4;
++            memset(mv, 0, n * 4 * 4 * sizeof(int16_t));
++            memset(rf, 0, n * 4 * 2 * sizeof(int8_t));
++            for (y = 0; y < grid_h; y++)
++                for (x = 0; x < grid_w; x++) {
++                    int xy = x + y * grid_stride;
++                    int o  = x + y * grid_w;
++                    int q;
++                    for (q = 0; q < 4; q++) {
++                        int qx = q & 1, qy = q >> 1;
++                        int bxy = (4 * x + 2 * qx) + (4 * y + 2 * qy) * mv_stride;
++                        int m = (o * 4 + q) * 4;
++                        int rfi = (o * 4 + q) * 2;
++                        if (motion_val && motion_val[0]) {
++                            mv[m + 0] = motion_val[0][bxy][0];
++                            mv[m + 1] = motion_val[0][bxy][1];
++                        }
++                        if (motion_val && motion_val[1]) {
++                            mv[m + 2] = motion_val[1][bxy][0];
++                            mv[m + 3] = motion_val[1][bxy][1];
++                        }
++                        rf[rfi + 0] = (ref_index && ref_index[0])
++                                      ? ref_index[0][4 * xy + q] : -1;
++                        rf[rfi + 1] = (ref_index && ref_index[1])
++                                      ? ref_index[1][4 * xy + q] : -1;
++                    }
++                }
++        }
 +    }
 +
      return 0;
  }
  
-@@ -62,16 +122,43 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -62,16 +162,43 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
  
  /* Allocate the HEVC side data on @frame (or return the one already attached)
   * and (re)write its header. On a fresh allocation the records are zeroed. */
@@ -408,7 +448,7 @@ index 2d817c7..c4fb8a7 100644
  
      sd = av_frame_get_side_data(frame, AV_FRAME_DATA_VEYE_BLOCKINFO);
      if (sd && sd->size == size) {
-@@ -94,31 +181,59 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
+@@ -94,31 +221,59 @@ static AVFrameSideData *veye_hevc_side_data(AVFrame *frame, int min_cb_width,
      hdr->grid_w      = (uint32_t)min_cb_width;
      hdr->grid_h      = (uint32_t)min_cb_height;
      hdr->block_unit  = (uint32_t)(1 << log2_min_cb_size);
@@ -473,7 +513,7 @@ index 2d817c7..c4fb8a7 100644
  {
      VeyeBlockRecordHEVC *rec;
      AVFrameSideData *sd;
-@@ -129,7 +244,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -129,7 +284,9 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
          return 0;
  
      sd = veye_hevc_side_data(frame, min_cb_width, min_cb_height,
@@ -484,7 +524,7 @@ index 2d817c7..c4fb8a7 100644
      if (!sd)
          return AVERROR(ENOMEM);
  
-@@ -142,31 +259,275 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -142,31 +299,275 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -766,7 +806,7 @@ index 2d817c7..c4fb8a7 100644
      return 0;
  }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..e6ddbe7 100644
+index eadfb7b..fb3ab3b 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,16 @@
@@ -774,7 +814,7 @@ index eadfb7b..e6ddbe7 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 9
++#define VEYE_BI_VERSION 10
 +
 +/* H.264 per-MB scratch stride (int32 per MB) in the decoder's veye_mb_bits
 + * table: [0]=total [1]=prediction [2]=transform bits, [3]=intra type
@@ -917,18 +957,20 @@ index eadfb7b..e6ddbe7 100644
  /**
   * Serialize a per-cell grid into AV_FRAME_DATA_VEYE_BLOCKINFO side data and
   * attach it to @p frame. Reads are indexed with @p grid_stride; output is
-@@ -61,6 +181,10 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -61,6 +181,12 @@ typedef struct VeyeBlockRecordHEVC {
   */
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
 +                             const int32_t *mb_bits,
++                             int16_t (*const motion_val[2])[2],
++                             const int8_t *const ref_index[2],
 +                             int own_poc,
 +                             const int32_t *l0_poc, int nb_l0,
 +                             const int32_t *l1_poc, int nb_l1,
                               int grid_w, int grid_h, int grid_stride,
                               int block_unit);
  
-@@ -74,7 +198,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -74,7 +200,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
   * frame. Records are zero-initialized. Returns 0 on success/skip, ENOMEM else.
   */
  int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
@@ -941,7 +983,7 @@ index eadfb7b..e6ddbe7 100644
  
  /**
   * Serialize an HEVC min-CB grid into AV_FRAME_DATA_VEYE_BLOCKINFO. The HEVC
-@@ -83,26 +211,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+@@ -83,26 +213,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
   * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
   * one is already attached, otherwise allocates a fresh one.
   *
