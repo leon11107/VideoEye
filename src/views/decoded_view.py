@@ -3,9 +3,14 @@
 import copy
 
 import numpy as np
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QScrollArea, QSizePolicy
-from PyQt6.QtCore import Qt, QSize, QPoint, QRect, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QGridLayout, QLabel, QScrollArea, QSizePolicy,
+    QFrame,
+)
+from PyQt6.QtCore import Qt, QSize, QPoint, QRect, QRectF, pyqtSignal
+from PyQt6.QtGui import (
+    QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent,
+)
 
 from .overlay import (
     OVERLAYS, OVERLAY_GROUPS, DEFAULT_ON, ALL_OVERLAY_KEYS,
@@ -91,6 +96,41 @@ class _ImageLabel(QLabel):
         super().leaveEvent(event)
 
 
+# Index ruler geometry/colours (Elecard-style block index strips).
+_RULER_T = 18           # top ruler height / left ruler width grows for digits
+_RULER_W = 34           # left ruler width
+_RULER_BG = QColor(46, 46, 46)
+_RULER_LINE = QColor(120, 120, 120)
+_RULER_TEXT = QColor(210, 210, 210)
+_RULER_CORNER = QColor(200, 90, 30)     # origin marker
+
+
+class _Ruler(QWidget):
+    """A top or left index strip showing block (MB/CTB) column/row numbers,
+    aligned with the scrolled/zoomed image. Painting is delegated to the
+    DecodedView which knows the image-to-viewport mapping."""
+
+    def __init__(self, view, horizontal: bool):
+        super().__init__(view)
+        self._view = view
+        self._horizontal = horizontal
+        if horizontal:
+            self.setFixedHeight(_RULER_T)
+            self.setSizePolicy(QSizePolicy.Policy.Ignored,
+                               QSizePolicy.Policy.Fixed)
+        else:
+            self.setFixedWidth(_RULER_W)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed,
+                               QSizePolicy.Policy.Ignored)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            self._view._paint_ruler(self, painter, self._horizontal)
+        finally:
+            painter.end()
+
+
 class DecodedView(QWidget):
     """Displays decoded video frames with optional analysis overlays."""
 
@@ -130,6 +170,7 @@ class DecodedView(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         # Image display label
         self._image_label = _ImageLabel()
@@ -141,9 +182,33 @@ class DecodedView(QWidget):
         self._image_label.clicked.connect(self._on_clicked)
         self._image_label.panned.connect(self._on_panned)
         self._image_label.zoom_requested.connect(self._on_zoom_requested)
-
         self._scroll.setWidget(self._image_label)
-        layout.addWidget(self._scroll)
+
+        # Block-index rulers (Elecard-style): a grid with an origin corner, a
+        # top column-index strip, a left row-index strip, and the scroll area.
+        self._ruler_visible = True
+        self._top_ruler = _Ruler(self, horizontal=True)
+        self._left_ruler = _Ruler(self, horizontal=False)
+        self._corner = QWidget()
+        self._corner.setFixedSize(_RULER_W, _RULER_T)
+        self._corner.setAutoFillBackground(True)
+        self._corner.setStyleSheet(
+            f"background-color: {_RULER_CORNER.name()};")
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        grid.addWidget(self._corner, 0, 0)
+        grid.addWidget(self._top_ruler, 0, 1)
+        grid.addWidget(self._left_ruler, 1, 0)
+        grid.addWidget(self._scroll, 1, 1)
+        layout.addLayout(grid)
+
+        # Repaint the rulers whenever the image is scrolled.
+        self._scroll.horizontalScrollBar().valueChanged.connect(
+            self._update_rulers)
+        self._scroll.verticalScrollBar().valueChanged.connect(
+            self._update_rulers)
 
     def display_frame(self, rgb_array: np.ndarray, frame_index: int = -1,
                       analysis=None) -> None:
@@ -410,6 +475,68 @@ class DecodedView(QWidget):
             )
             self._image_label.setPixmap(scaled)
             self._image_label.resize(scaled.size())
+        self._update_rulers()
+
+    def _ruler_unit(self) -> int:
+        """Native px per index cell: the MB (16) for H.264, LCU/SB (64) for
+        HEVC/AV1 -- so the index numbers a block's row/column."""
+        codec = (self._analysis.codec or "").lower() if self._analysis else ""
+        return 16 if codec in ("h264", "avc") else 64
+
+    def _update_rulers(self) -> None:
+        if getattr(self, "_top_ruler", None) is not None:
+            self._top_ruler.update()
+            self._left_ruler.update()
+
+    def set_ruler_visible(self, visible: bool) -> None:
+        """Show/hide the block-index rulers."""
+        self._ruler_visible = visible
+        for w in (self._top_ruler, self._left_ruler, self._corner):
+            w.setVisible(visible)
+
+    def _paint_ruler(self, ruler, painter: QPainter, horizontal: bool) -> None:
+        """Draw block-index ticks/numbers on a ruler, aligned to the displayed
+        image's position (accounts for zoom, scroll and centering)."""
+        painter.fillRect(ruler.rect(), _RULER_BG)
+        shown = self._image_label.pixmap()
+        if self._pixmap is None or shown is None or shown.width() == 0:
+            return
+        scale = shown.width() / self._pixmap.width()
+        unit = self._ruler_unit()
+        # Image label origin in the scroll viewport's coordinates (negative when
+        # scrolled, positive when the image is centered/smaller than viewport).
+        off = self._image_label.mapTo(self._scroll.viewport(), QPoint(0, 0))
+        off_main = off.x() if horizontal else off.y()
+        span = self._pixmap.width() if horizontal else self._pixmap.height()
+        length = ruler.width() if horizontal else ruler.height()
+        step_px = unit * scale
+        if step_px <= 0:
+            return
+        # Label every Nth block so numbers never crowd (>= ~30 px apart).
+        label_step = max(1, int(np.ceil(30.0 / step_px)))
+        n = span // unit
+        f = painter.font()
+        f.setPointSize(8)
+        painter.setFont(f)
+        fm = painter.fontMetrics()
+        for k in range(n + 1):
+            pos = off_main + k * unit * scale
+            if pos < -1 or pos > length + 1:
+                continue
+            painter.setPen(QPen(_RULER_LINE, 1))
+            if horizontal:
+                painter.drawLine(int(pos), _RULER_T - 5, int(pos), _RULER_T - 1)
+            else:
+                painter.drawLine(_RULER_W - 5, int(pos), _RULER_W - 1, int(pos))
+            if k % label_step == 0 and k < n:
+                painter.setPen(QPen(_RULER_TEXT, 1))
+                s = str(k)
+                if horizontal:
+                    painter.drawText(int(pos) + 2, _RULER_T - 6, s)
+                else:
+                    w = fm.horizontalAdvance(s)
+                    painter.drawText(_RULER_W - 7 - w, int(pos) + fm.ascent() + 1,
+                                     s)
 
     def set_fit_to_window(self, fit: bool) -> None:
         """Set whether to fit image to window."""
@@ -504,6 +631,7 @@ class DecodedView(QWidget):
         super().resizeEvent(event)
         if self._fit_to_window and self._pixmap:
             self._update_display()
+        self._update_rulers()
 
     def clear(self) -> None:
         """Clear the displayed frame."""
