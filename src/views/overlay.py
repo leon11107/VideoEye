@@ -227,10 +227,10 @@ def render_tile_boundaries(painter: QPainter, analysis: FrameAnalysis) -> None:
     _draw_lines(painter, analysis.tile_lines, QColor(40, 220, 230), 3)
 
 
-# Intra-mode overlay: one Elecard-style violet, hollow line-art glyphs --
-# angular = a line at the prediction angle, DC = a hollow circle, planar = a
-# hollow square. Shape (not colour) distinguishes the categories.
-_INTRA_COLOR = QColor(150, 115, 215)
+# Intra-mode overlay: Elecard-style blue, hollow line-art glyphs -- angular = a
+# line at the prediction angle, DC = a hollow circle, planar = a hollow square.
+# Shape (not colour) distinguishes the categories.
+_INTRA_COLOR = QColor(60, 95, 225)
 
 
 def _hevc_intra_dirs() -> np.ndarray:
@@ -288,10 +288,11 @@ def _intra_dir_table(codec: str) -> np.ndarray:
     return np.zeros((1, 2), dtype=np.float32)
 
 
-# Elecard-style intra glyphs: thin violet line art, hollow, one per block.
-def _intra_glyph_half(sel) -> np.ndarray:
-    """Half-extent (px) of the centre glyph, scaled to block size, clamped."""
-    return np.clip((np.minimum(sel["w"], sel["h"]) * 0.3).astype(np.int32), 3, 12)
+# Elecard-style intra glyphs: thin blue line art, hollow, one per coding block.
+def _intra_glyph_half(sel):
+    """Half-extent (px) of the centre glyph, scaled to the block size so a 4x4
+    glyph fits in 4 px and a 16x16 nearly fills the block (Elecard-style)."""
+    return np.clip(np.minimum(sel["w"], sel["h"]) * 0.42, 1.5, 12.0)
 
 
 def render_intra_angular(painter: QPainter, analysis: FrameAnalysis) -> None:
@@ -307,14 +308,19 @@ def render_intra_angular(painter: QPainter, analysis: FrameAnalysis) -> None:
     d = dirs[np.clip(sel["mode"], 0, len(dirs) - 1)]
     cx = sel["x"] + sel["w"] / 2.0
     cy = sel["y"] + sel["h"] / 2.0
-    ln = _intra_glyph_half(sel).astype(np.float32)
+    # Line spans most of the block (Elecard-style), scaled to its size.
+    ln = _intra_glyph_half(sel) * 1.05
+    # Precompute endpoints with numpy, then build the QLineF list from flat
+    # Python floats -- far cheaper than per-element arithmetic for ~45k lines.
+    x1 = (cx - d[:, 0] * ln).tolist()
+    y1 = (cy - d[:, 1] * ln).tolist()
+    x2 = (cx + d[:, 0] * ln).tolist()
+    y2 = (cy + d[:, 1] * ln).tolist()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setPen(QPen(_INTRA_COLOR, 1.2))
+    painter.setPen(QPen(_INTRA_COLOR, 1.1))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawLines([QLineF(float(a - dx * L), float(b - dy * L),
-                              float(a + dx * L), float(b + dy * L))
-                       for a, b, dx, dy, L in
-                       zip(cx, cy, d[:, 0], d[:, 1], ln)])
+    painter.drawLines([QLineF(x1[i], y1[i], x2[i], y2[i])
+                       for i in range(len(x1))])
 
 
 def render_intra_dc(painter: QPainter, analysis: FrameAnalysis) -> None:

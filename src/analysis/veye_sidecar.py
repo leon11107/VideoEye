@@ -858,36 +858,56 @@ def h264_intra_blocksize_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]
     return bs
 
 
-def _intra_from_h264(fb: VeyeFrameBlocks) -> np.ndarray:
-    """Intra-prediction records for an H.264 frame: ONE 16x16 record per intra
-    MB carrying the representative (top-left) canonical luma mode.
-
-    Per-MB (not per-sub-block) keeps the overlay fast and readable -- an I_4x4
-    MB would otherwise emit 16 tiny glyphs (~48k/frame at 1080p, ~210 ms). The
-    exact per-4x4 sub-block mode is still available to the block-info panel via
-    FrameAnalysis.h264_intra_at()."""
-    it = fb.mb_intra_type
-    md = fb.mb_luma_mode
-    if it is None or md is None:
-        return np.empty(0, dtype=INTRA_DTYPE)
-    mask = (it == 1) | (it == 2)               # intra, excluding PCM
-    ys, xs = np.nonzero(mask)
-    if len(xs) == 0:
-        return np.empty(0, dtype=INTRA_DTYPE)
-    unit = fb.block_unit
-    modes = md[ys, xs].astype(np.int16)
-    types = it[ys, xs]
-    out = np.empty(len(xs), dtype=INTRA_DTYPE)
-    out["x"] = xs * unit
-    out["y"] = ys * unit
-    out["w"] = unit
-    out["h"] = unit
-    out["mode"] = modes
+def _intra_sub_records(ys, xs, md, idx, bx_off, by_off, size, is16):
+    """Build INTRA_DTYPE records for one sub-block slot across many MBs.
+    idx selects which of the 16 per-4x4 modes to read; (bx_off, by_off) is the
+    sub-block's pixel offset within the MB; size is its side; is16 enables the
+    Plane category (only I_16x16 has it)."""
+    r = np.empty(len(xs), dtype=INTRA_DTYPE)
+    r["x"] = xs * 16 + bx_off
+    r["y"] = ys * 16 + by_off
+    r["w"] = size
+    r["h"] = size
+    m = md[ys, xs, idx].astype(np.int16)
+    r["mode"] = m
     cat = np.full(len(xs), INTRA_ANGULAR, dtype=np.uint8)
-    cat[modes == 2] = INTRA_DC
-    cat[(types == 2) & (modes == 3)] = INTRA_PLANE   # I_16x16 mode 3 = Plane
-    out["cat"] = cat
-    return out
+    cat[m == 2] = INTRA_DC
+    if is16:
+        cat[m == 3] = INTRA_PLANE
+    r["cat"] = cat
+    return r
+
+
+def _intra_from_h264(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Intra-prediction records for an H.264 frame, ONE per coding sub-block to
+    match Elecard: I_16x16 -> one 16x16, I_8x8 -> four 8x8, I_4x4 -> sixteen
+    4x4. Vectorized (per sub-block slot) so the full ~48k-glyph frame builds in
+    ~1.5 ms; glyphs are sized to the block by the overlay."""
+    it = fb.mb_intra_type
+    md = fb.mb_luma_mode4
+    mt = fb.mb_type
+    if it is None or md is None or mt is None:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    parts = []
+    ys, xs = np.nonzero(it == 2)               # I_16x16
+    if len(xs):
+        parts.append(_intra_sub_records(ys, xs, md, 0, 0, 0, 16, True))
+    m8 = (it == 1) & ((mt & MB_TYPE_8x8DCT) != 0)   # I_8x8
+    ys, xs = np.nonzero(m8)
+    if len(xs):
+        for blk8 in range(4):
+            parts.append(_intra_sub_records(
+                ys, xs, md, blk8 * 4, (blk8 & 1) * 8, (blk8 >> 1) * 8, 8, False))
+    m4 = (it == 1) & ((mt & MB_TYPE_8x8DCT) == 0)   # I_4x4
+    ys, xs = np.nonzero(m4)
+    if len(xs):
+        for i in range(16):
+            x4, y4 = _H264_BLK_SCAN[i]
+            parts.append(_intra_sub_records(
+                ys, xs, md, i, x4 * 4, y4 * 4, 4, False))
+    if not parts:
+        return np.empty(0, dtype=INTRA_DTYPE)
+    return np.concatenate(parts)
 
 
 def _intra_from_hevc(fb: VeyeFrameBlocks) -> np.ndarray:
