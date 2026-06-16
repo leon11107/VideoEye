@@ -33,6 +33,7 @@ from .veye_sidecar import (
     VeyeFrameBlocks,
     bit_sizes_from_frame,
     ctu_bit_sizes_from_frame,
+    h264_intra_blocksize_from_frame,
     blocks_from_frame,
     load_sidecar,
     intra_modes_from_frame,
@@ -360,6 +361,14 @@ class BlockSidecar:
         if fb is None or fb.mb_intra_type is None:
             return None
         return fb.mb_intra_type, fb.mb_luma_mode, fb.mb_slice_id
+
+    def h264_intra_detail_for(self, frame_index: int):
+        """H.264 per-4x4 luma mode grid + per-MB intra block-size grid, or
+        None. For the block-info panel's exact sub-block lookup."""
+        fb = self._frame(frame_index)
+        if fb is None or fb.mb_luma_mode4 is None:
+            return None
+        return fb.mb_luma_mode4, h264_intra_blocksize_from_frame(fb)
 
     def block_unit_for(self, frame_index: int) -> Optional[int]:
         """Pixels per QP/block grid cell for a frame, or None if not ready."""

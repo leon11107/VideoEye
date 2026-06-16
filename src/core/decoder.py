@@ -314,6 +314,10 @@ class Decoder:
                 analysis.tu_chroma = self._block_sidecar.tu_chroma_for(sc_index)
             if "intra" in want and analysis.intra is None:
                 analysis.intra = self._block_sidecar.intra_modes_for(sc_index)
+                if analysis.codec in ("h264", "avc"):
+                    det = self._block_sidecar.h264_intra_detail_for(sc_index)
+                    if det is not None:
+                        analysis.h264_mode4, analysis.h264_blocksize = det
             if "bits" in want and analysis.bit_sizes is None:
                 analysis.bit_sizes = self._block_sidecar.bit_sizes_for(sc_index)
             if "bits_ctu" in want and analysis.ctu_bit_sizes is None:

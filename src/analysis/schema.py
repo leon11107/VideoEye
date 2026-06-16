@@ -62,6 +62,21 @@ BLOCK_DTYPE = np.dtype([
 ])
 
 
+# H.264 raster 4x4 position (y4*4+x4) -> block-scan index, inverse of the
+# block-scan->position map used when exporting per-4x4 intra modes.
+def _h264_raster_to_scan():
+    inv = [0] * 16
+    for i in range(16):
+        blk8, sub = i >> 2, i & 3
+        x4 = (blk8 & 1) * 2 + (sub & 1)
+        y4 = (blk8 >> 1) * 2 + (sub >> 1)
+        inv[y4 * 4 + x4] = i
+    return tuple(inv)
+
+
+_H264_RASTER_TO_SCAN = _h264_raster_to_scan()
+
+
 class PredType:
     UNKNOWN = 0
     INTRA = 1
@@ -128,6 +143,11 @@ class FrameAnalysis:
     h264_intra_type: Optional[np.ndarray] = None
     h264_luma_mode: Optional[np.ndarray] = None
     h264_slice: Optional[np.ndarray] = None
+    # H.264 exact per-4x4 luma intra mode grid (grid_h, grid_w, 16) in H.264
+    # block-scan order, and per-MB intra block size (16/8/4/0). For the block
+    # info panel's exact sub-block lookup (the overlay uses one mode per MB).
+    h264_mode4: Optional[np.ndarray] = None
+    h264_blocksize: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -235,6 +255,27 @@ class FrameAnalysis:
             return None
         areas = hits["w"].astype(np.int32) * hits["h"].astype(np.int32)
         return hits[int(np.argmin(areas))]
+
+    def h264_intra_at(self, px: int, py: int):
+        """Exact H.264 intra (mode, block_size) at pixel (px, py), or None when
+        not intra. block_size is 16/8/4; mode is the canonical luma intra mode
+        of the covering 4x4 sub-block."""
+        if self.h264_blocksize is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if (row >= self.h264_blocksize.shape[0]
+                or col >= self.h264_blocksize.shape[1]):
+            return None
+        size = int(self.h264_blocksize[row, col])
+        if size == 0:
+            return None
+        mode = None
+        if self.h264_mode4 is not None:
+            x4 = (px % self.qp_unit) // 4
+            y4 = (py % self.qp_unit) // 4
+            i = _H264_RASTER_TO_SCAN[y4 * 4 + x4]
+            mode = int(self.h264_mode4[row, col, i])
+        return mode, size
 
     def h264_aux_at(self, px: int, py: int):
         """H.264 (intra_type, luma_mode, slice_id) at pixel (px, py), or None."""

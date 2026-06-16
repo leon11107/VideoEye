@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRect, Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen
 
 from ..analysis import FrameAnalysis, PredType
 from ..analysis.schema import INTRA_DC, INTRA_PLANE, INTRA_ANGULAR
@@ -328,13 +328,13 @@ def render_intra_dc(painter: QPainter, analysis: FrameAnalysis) -> None:
     r = _intra_glyph_half(sel)
     cx = sel["x"] + sel["w"] / 2.0
     cy = sel["y"] + sel["h"] / 2.0
-    path = QPainterPath()
-    for x, y, rr in zip(cx, cy, r):
-        path.addEllipse(QPointF(float(x), float(y)), float(rr), float(rr))
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setPen(QPen(_INTRA_COLOR, 1.2))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawPath(path)
+    # A per-circle drawEllipse loop is ~7x faster than one QPainterPath of all
+    # ellipses (AA tessellation of a huge multi-subpath path blows up).
+    for x, y, rr in zip(cx.tolist(), cy.tolist(), r.tolist()):
+        painter.drawEllipse(QPointF(x, y), float(rr), float(rr))
 
 
 def render_intra_plane(painter: QPainter, analysis: FrameAnalysis) -> None:
