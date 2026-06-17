@@ -47,8 +47,8 @@ from .veye_sidecar import (
     tu_luma_from_frame,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_PROBE = _REPO_ROOT / "native" / "veye_probe.exe"
+from ..resources import resource_path
+_PROBE = Path(resource_path("native/veye_probe.exe"))
 
 # Hard ceiling on a single probe run, mirroring the old synchronous timeout.
 _PROBE_TIMEOUT = 600

@@ -7,13 +7,13 @@ the toggle can re-apply them. Overlay colours drawn on the decoded *video* frame
 are intentionally NOT themed (they sit on image pixels, not UI chrome).
 """
 
-import os
 from dataclasses import dataclass
 
 from PyQt6.QtGui import QColor, QPalette
 
-_CHECK_SVG = os.path.join(os.path.dirname(__file__), "assets",
-                          "check.svg").replace("\\", "/")
+from .resources import resource_path
+
+_CHECK_SVG = resource_path("src/assets/check.svg").replace("\\", "/")
 
 
 @dataclass(frozen=True)
