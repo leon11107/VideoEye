@@ -7,9 +7,13 @@ the toggle can re-apply them. Overlay colours drawn on the decoded *video* frame
 are intentionally NOT themed (they sit on image pixels, not UI chrome).
 """
 
+import os
 from dataclasses import dataclass
 
 from PyQt6.QtGui import QColor, QPalette
+
+_CHECK_SVG = os.path.join(os.path.dirname(__file__), "assets",
+                          "check.svg").replace("\\", "/")
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,21 @@ def build_stylesheet(t: Theme) -> str:
                      margin-top: 8px; padding-top: 8px; }}
         QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left;
                             padding: 0 4px; color: {t.hx(t.text)}; }}
+        QCheckBox::indicator, QGroupBox::indicator {{
+            width: 14px; height: 14px;
+            border: 1px solid {t.hx(t.border)};
+            border-radius: 3px;
+            background-color: {t.hx(t.base)};
+        }}
+        QCheckBox::indicator:hover, QGroupBox::indicator:hover {{
+            border-color: {t.hx(t.highlight)};
+        }}
+        QCheckBox::indicator:checked, QGroupBox::indicator:checked {{
+            background-color: {t.hx(t.highlight)};
+            border-color: {t.hx(t.highlight)};
+            image: url("{_CHECK_SVG}");
+        }}
+        QCheckBox::indicator:disabled {{ border-color: {t.hx(t.disabled_text)}; }}
     """
 
 
