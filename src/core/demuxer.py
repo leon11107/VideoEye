@@ -307,6 +307,51 @@ class Demuxer:
         except Exception as e:
             print(f"Error classifying frame types: {e}")
 
+        # Authoritative refinement: the decoder knows each frame's real
+        # picture type (I/P/B). Hand-parsing slice headers (esp. HEVC) is
+        # unreliable, so decode the stream and assign pict_type by PTS. Frames
+        # without a PTS (raw streams) keep their slice-parsed type above.
+        self._refine_types_via_decode(progress_cb)
+
+    # AVPictureType enum values (NONE=0, I=1, P=2, B=3, S=4, SI=5, SP=6, BI=7).
+    # frame.pict_type may be an int or an IntEnum depending on the PyAV version.
+    _PICT_TYPE_MAP = {
+        1: FrameType.I, 5: FrameType.I,
+        2: FrameType.P, 4: FrameType.P, 6: FrameType.P,
+        3: FrameType.B, 7: FrameType.B,
+    }
+
+    def _refine_types_via_decode(self, progress_cb=None) -> None:
+        """Override frame types with the decoder's pict_type, keyed by PTS."""
+        any_pts = any(f.pts is not None for f in self._frames)
+        if not any_pts:
+            return  # raw stream without timestamps: nothing to key on
+        try:
+            cont = av.open(self._file_path)
+            stream = next((s for s in cont.streams if s.type == "video"), None)
+            if stream is None:
+                cont.close()
+                return
+            by_pts = {}
+            done = 0
+            total = len(self._frames)
+            for frame in cont.decode(stream):
+                try:
+                    ft = self._PICT_TYPE_MAP.get(int(frame.pict_type))
+                except (TypeError, ValueError):
+                    ft = None
+                if ft is not None and frame.pts is not None:
+                    by_pts[frame.pts] = ft
+                done += 1
+                if progress_cb is not None and (done & 0x3F) == 0:
+                    progress_cb("classify", done, total)
+            cont.close()
+            for f in self._frames:
+                if f.pts in by_pts:
+                    f.frame_type = by_pts[f.pts]
+        except Exception as e:
+            print(f"Error refining frame types via decode: {e}")
+
     # ------------------------------------------------------------------ #
     # Stream info & frame extraction
     # ------------------------------------------------------------------ #
