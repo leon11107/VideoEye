@@ -121,14 +121,10 @@ class BarChartWidget(QWidget):
             # Get color for frame type
             color = self.COLORS.get(frame.frame_type, self.COLORS[FrameType.UNKNOWN])
 
-            # Highlight selected frame
+            # Subtle bar lightening; the precise position is marked by the
+            # vertical cursor lines drawn on top (see _draw_cursors).
             if i == self._selected_index:
                 color = color.lighter(140)
-                # Draw selection indicator
-                painter.setPen(QPen(QColor(255, 255, 255), 2))
-                painter.drawRect(x - 1, height - bar_height - 11, self._bar_width + 2, bar_height + 2)
-
-            # Highlight hovered frame
             elif i == self._hover_index:
                 color = color.lighter(120)
 
@@ -159,8 +155,32 @@ class BarChartWidget(QWidget):
         # Reference-frame markers/arrows for the selected frame.
         self._draw_ref_markers(painter, step, first, last, height, available_height)
 
+        # Elecard-style position cursors, drawn on top of everything.
+        self._draw_cursors(painter, step, height)
+
         # Draw legend
         self._draw_legend(painter, rect)
+
+    def _draw_cursors(self, painter: QPainter, step: int, height: int) -> None:
+        """Vertical position cursors (Elecard-style): a single black line marks
+        the current decoded/selected frame, a double black line marks the frame
+        under the mouse. A light halo keeps the black lines crisp on the dark
+        chart background."""
+        def vline(i: int, double: bool) -> None:
+            cx = 5 + i * step + self._bar_width / 2.0
+            offsets = (-2.5, 2.5) if double else (0.0,)
+            for o in offsets:
+                x = int(round(cx + o))
+                painter.setPen(QPen(QColor(235, 235, 235, 220), 4))
+                painter.drawLine(x, 0, x, height)
+                painter.setPen(QPen(QColor(0, 0, 0), 2))
+                painter.drawLine(x, 0, x, height)
+
+        if 0 <= self._selected_index < len(self._frames):
+            vline(self._selected_index, False)
+        if (0 <= self._hover_index < len(self._frames)
+                and self._hover_index != self._selected_index):
+            vline(self._hover_index, True)
 
     def _bar_top(self, i: int, height: int, available_height: int) -> int:
         """Y of the top of frame i's bar (the marker anchors just above it)."""
@@ -284,11 +304,11 @@ class BarChartWidget(QWidget):
         return QRect(x0, 0, x1 - x0, self.height())
 
     def _bar_rect(self, index: int) -> QRect:
-        """Full-height repaint rect for one bar (covers its selection border
-        and keyframe triangle)."""
+        """Full-height repaint rect for one bar (covers its keyframe triangle and
+        the position cursor lines, incl. the offset double hover line + halo)."""
         step = self._bar_width + self._bar_spacing
         x = 5 + index * step
-        return QRect(x - 2, 0, self._bar_width + 4, self.height())
+        return QRect(x - 5, 0, self._bar_width + 10, self.height())
 
     def _get_frame_at_pos(self, x: int) -> int:
         """Get frame index at x position."""
