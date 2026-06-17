@@ -14,6 +14,7 @@ class BarChartWidget(QWidget):
     """Widget that draws the actual bar chart."""
 
     frame_selected = pyqtSignal(int)  # Emits frame index
+    hover_changed = pyqtSignal(int)   # Emits hovered frame index (-1 = none)
 
     # Colors for frame types
     COLORS = {
@@ -271,6 +272,7 @@ class BarChartWidget(QWidget):
         if index != self._hover_index:
             old = self._hover_index
             self._hover_index = index
+            self.hover_changed.emit(index)
             # Repaint only the two affected bars, not the whole (100k-wide)
             # widget, so hover stays cheap while scrubbing the chart.
             for i in (old, index):
@@ -297,7 +299,9 @@ class BarChartWidget(QWidget):
 
     def leaveEvent(self, event):
         """Handle mouse leaving widget."""
-        self._hover_index = -1
+        if self._hover_index != -1:
+            self._hover_index = -1
+            self.hover_changed.emit(-1)
         self.update()
 
     def _ref_bounds(self) -> QRect:
@@ -442,6 +446,7 @@ class HierarchyWidget(QWidget):
         self._bar_width = 4
         self._bar_spacing = 1
         self._selected = -1
+        self._hover = -1
         self.setFixedHeight(self.HEIGHT)
         self.setMouseTracking(True)
 
@@ -466,6 +471,11 @@ class HierarchyWidget(QWidget):
     def set_selected(self, index: int) -> None:
         if index != self._selected:
             self._selected = index
+            self.update()
+
+    def set_hover(self, index: int) -> None:
+        if index != self._hover:
+            self._hover = index
             self.update()
 
     def _step(self) -> int:
@@ -557,15 +567,25 @@ class HierarchyWidget(QWidget):
             rad = 4.0 if sel else 2.6
             painter.drawEllipse(QPointF(cx, cy), rad, rad)
 
-        # Current/locked-frame cursor: extend the chart's single black line down
-        # through the hierarchy (Elecard-style) so it spans both views as one.
+        # Position cursors: extend the chart's lines down through the hierarchy
+        # (Elecard-style) so each spans both views as one. Current/locked frame
+        # = single line; hovered frame = double line. Matches _draw_cursors.
+        def vline(i: int, double: bool) -> None:
+            cx = 5 + i * step + self._bar_width / 2.0
+            offsets = (-2.0, 2.0) if double else (0.0,)
+            halo_w = 2 if double else 3
+            core_w = 1 if double else 2
+            for o in offsets:
+                x = int(round(cx + o))
+                painter.setPen(QPen(t.cursor_halo, halo_w))
+                painter.drawLine(x, 0, x, self.HEIGHT)
+                painter.setPen(QPen(t.cursor_core, core_w))
+                painter.drawLine(x, 0, x, self.HEIGHT)
+
         if 0 <= self._selected < n:
-            cx = 5 + self._selected * step + self._bar_width / 2.0
-            x = int(round(cx))
-            painter.setPen(QPen(t.cursor_halo, 3))
-            painter.drawLine(x, 0, x, self.HEIGHT)
-            painter.setPen(QPen(t.cursor_core, 2))
-            painter.drawLine(x, 0, x, self.HEIGHT)
+            vline(self._selected, False)
+        if 0 <= self._hover < n and self._hover != self._selected:
+            vline(self._hover, True)
 
 
 class BarChartView(QWidget):
@@ -601,6 +621,8 @@ class BarChartView(QWidget):
         self._hierarchy.frame_clicked.connect(self.frame_selected)
         self._hierarchy.setVisible(False)  # off by default; toggled via legend
         self._legend.hierarchy_toggled.connect(self._hierarchy.setVisible)
+        # Mirror the chart's hover so its double-line cursor extends downward.
+        self._chart.hover_changed.connect(self._hierarchy.set_hover)
 
         container = QWidget()
         cl = QVBoxLayout(container)
