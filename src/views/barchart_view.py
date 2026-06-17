@@ -550,6 +550,16 @@ class HierarchyWidget(QWidget):
             rad = 4.0 if sel else 2.6
             painter.drawEllipse(QPointF(cx, cy), rad, rad)
 
+        # Current/locked-frame cursor: extend the chart's single black line down
+        # through the hierarchy (Elecard-style) so it spans both views as one.
+        if 0 <= self._selected < n:
+            cx = 5 + self._selected * step + self._bar_width / 2.0
+            x = int(round(cx))
+            painter.setPen(QPen(t.cursor_halo, 3))
+            painter.drawLine(x, 0, x, self.HEIGHT)
+            painter.setPen(QPen(t.cursor_core, 2))
+            painter.drawLine(x, 0, x, self.HEIGHT)
+
 
 class BarChartView(QWidget):
     """Scrollable bar chart view with a fixed legend on the left."""
