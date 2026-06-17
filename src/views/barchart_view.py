@@ -168,15 +168,19 @@ class BarChartWidget(QWidget):
         the current decoded/selected frame, a double black line marks the frame
         under the mouse. A light halo keeps the black lines crisp on the dark
         chart background."""
+        t = current_theme()
+
         def vline(i: int, double: bool) -> None:
             cx = 5 + i * step + self._bar_width / 2.0
-            offsets = (-2.5, 2.5) if double else (0.0,)
-            t = current_theme()
+            # Hover = two thin lines; current frame = one slightly bolder line.
+            offsets = (-2.0, 2.0) if double else (0.0,)
+            halo_w = 2 if double else 3
+            core_w = 1 if double else 2
             for o in offsets:
                 x = int(round(cx + o))
-                painter.setPen(QPen(t.cursor_halo, 4))
+                painter.setPen(QPen(t.cursor_halo, halo_w))
                 painter.drawLine(x, 0, x, height)
-                painter.setPen(QPen(t.cursor_core, 2))
+                painter.setPen(QPen(t.cursor_core, core_w))
                 painter.drawLine(x, 0, x, height)
 
         if 0 <= self._selected_index < len(self._frames):
