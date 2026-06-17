@@ -31,7 +31,7 @@ class BarChartWidget(QWidget):
         self._bar_spacing = 1
         self._max_frame_size = 1
         self._max_bitrate = 1  # peak instantaneous bitrate (bps), for the line
-        self._show_bitrate = True
+        self._show_bitrate = False  # off by default; toggled via legend
         self._selected_index = -1
         self._hover_index = -1
         # Reference frames of the selected frame (decode-order indices), per
@@ -297,6 +297,11 @@ class BarChartWidget(QWidget):
             else:
                 self.setToolTip("")
 
+    def set_show_bitrate(self, on: bool) -> None:
+        if on != self._show_bitrate:
+            self._show_bitrate = on
+            self.update()
+
     def set_hover(self, index: int) -> None:
         """Set the hovered frame from an external source (e.g. the hierarchy)
         without re-emitting hover_changed, so the two widgets stay in sync
@@ -370,15 +375,34 @@ class LegendWidget(QWidget):
     BITRATE_COLOR = QColor(255, 200, 40)
     HIERARCHY_COLOR = QColor(40, 160, 60)  # matches HierarchyWidget._EDGE
 
+    bitrate_toggled = pyqtSignal(bool)
     hierarchy_toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(92)
         self.setMinimumHeight(60)
+        self._bitrate_visible = False   # both overlays off by default
         self._hierarchy_visible = False
-        self._hier_hit = QRect()  # clickable area for the hierarchy toggle
+        self._bitrate_hit = QRect()     # clickable areas for the toggles
+        self._hier_hit = QRect()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _draw_toggle(self, painter, t, y, color, label, on) -> QRect:
+        """A checkbox + colored line key + label; returns its clickable rect."""
+        box = QRect(6, y, 10, 10)
+        painter.setPen(QPen(t.chart_text_dim, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(box)
+        if on:
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(box.left() + 1, box.center().y() + 1,
+                             box.right() - 1, box.center().y() + 1)
+        painter.setPen(QPen(color, 2))
+        painter.drawLine(20, y + 5, 30, y + 5)
+        painter.setPen(t.chart_text if on else t.chart_text_dim)
+        painter.drawText(34, y + 9, label)
+        return QRect(2, y - 2, self.width() - 4, 18)
 
     def paintEvent(self, event):
         t = current_theme()
@@ -403,31 +427,22 @@ class LegendWidget(QWidget):
             painter.drawText(20, y + 9, label)
             y += 18
 
-        # Bitrate-line key.
-        painter.setPen(QPen(self.BITRATE_COLOR, 2))
-        painter.drawLine(6, y + 5, 16, y + 5)
-        painter.setPen(t.chart_text)
-        painter.drawText(20, y + 9, "Bitrate")
-        y += 22
-
-        # Hierarchy toggle: a checkbox + green line key, click to show/hide.
-        self._hier_hit = QRect(2, y - 2, self.width() - 4, 18)
-        box = QRect(6, y, 10, 10)
-        painter.setPen(QPen(t.chart_text_dim, 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(box)
-        if self._hierarchy_visible:
-            painter.setPen(QPen(self.HIERARCHY_COLOR, 2))
-            painter.drawLine(box.left() + 1, box.center().y() + 1,
-                             box.right() - 1, box.center().y() + 1)
-        painter.setPen(QPen(self.HIERARCHY_COLOR, 2))
-        painter.drawLine(20, y + 5, 30, y + 5)
-        painter.setPen(t.chart_text if self._hierarchy_visible else t.chart_text_dim)
-        painter.drawText(34, y + 9, "Refs")
+        y += 2
+        self._bitrate_hit = self._draw_toggle(
+            painter, t, y, self.BITRATE_COLOR, "Bitrate", self._bitrate_visible)
+        y += 20
+        self._hier_hit = self._draw_toggle(
+            painter, t, y, self.HIERARCHY_COLOR, "Refs", self._hierarchy_visible)
 
     def mousePressEvent(self, event: QMouseEvent):
-        if (event.button() == Qt.MouseButton.LeftButton
-                and self._hier_hit.contains(event.position().toPoint())):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        p = event.position().toPoint()
+        if self._bitrate_hit.contains(p):
+            self._bitrate_visible = not self._bitrate_visible
+            self.update()
+            self.bitrate_toggled.emit(self._bitrate_visible)
+        elif self._hier_hit.contains(p):
             self._hierarchy_visible = not self._hierarchy_visible
             self.update()
             self.hierarchy_toggled.emit(self._hierarchy_visible)
@@ -651,6 +666,7 @@ class BarChartView(QWidget):
         self._hierarchy.frame_clicked.connect(self.frame_selected)
         self._hierarchy.setVisible(False)  # off by default; toggled via legend
         self._legend.hierarchy_toggled.connect(self._hierarchy.setVisible)
+        self._legend.bitrate_toggled.connect(self._chart.set_show_bitrate)
         # Mirror hover both ways so the cursor tracks the mouse over either the
         # bars or the hierarchy. The set_hover setters don't re-emit, so there's
         # no signal loop.
