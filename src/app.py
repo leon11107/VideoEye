@@ -6,8 +6,12 @@ from PyQt6.QtWidgets import (
     QApplication, QToolBar, QStatusBar, QProgressDialog,
     QSpinBox, QLabel
 )
-from PyQt6.QtCore import Qt, QTimer, QMutex
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtCore import Qt, QTimer, QMutex, QSettings
+from PyQt6.QtGui import QAction, QKeySequence, QActionGroup
+
+from .theme import (
+    current_theme, set_current_theme, apply_theme_to_app,
+)
 
 from .core.demuxer import Demuxer
 from .core.decoder import Decoder
@@ -218,6 +222,18 @@ class MainWindow(QMainWindow):
         zoom_out_action.triggered.connect(self._decoded_view.zoom_out)
         view_menu.addAction(zoom_out_action)
 
+        # Theme submenu (Dark / Light), persisted across sessions.
+        view_menu.addSeparator()
+        theme_menu = view_menu.addMenu("&Theme")
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        for label, key in (("&Dark", "dark"), ("&Light (Elecard)", "light")):
+            act = QAction(label, self, checkable=True)
+            act.setChecked(current_theme().name == key)
+            act.triggered.connect(lambda _checked, k=key: self._set_theme(k))
+            theme_group.addAction(act)
+            theme_menu.addAction(act)
+
         # Navigate menu
         nav_menu = menubar.addMenu("&Navigate")
 
@@ -273,6 +289,20 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _set_theme(self, name: str) -> None:
+        """Switch the dark/light theme: re-apply the app palette/stylesheet,
+        re-theme the custom widgets, persist the choice, and repaint."""
+        set_current_theme(name)
+        app = QApplication.instance()
+        apply_theme_to_app(app)
+        # Custom widgets that set their own stylesheets re-apply them.
+        for w in app.allWidgets():
+            fn = getattr(w, "apply_theme", None)
+            if callable(fn):
+                fn()
+            w.update()
+        QSettings().setValue("theme", name)
 
     def _setup_toolbar(self):
         """Set up toolbar."""

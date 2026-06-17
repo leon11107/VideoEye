@@ -16,6 +16,7 @@ from .overlay import (
     OVERLAYS, OVERLAY_GROUPS, DEFAULT_ON, ALL_OVERLAY_KEYS,
     render_partition, render_mode, render_block_types,
 )
+from ..theme import current_theme
 
 # Always-on hover inspection overlay: reveal the region's CU/PU/TU partition,
 # block type and MVs regardless of the overlay toggles. Intra-mode glyphs are
@@ -96,13 +97,10 @@ class _ImageLabel(QLabel):
         super().leaveEvent(event)
 
 
-# Index ruler geometry/colours (Elecard-style block index strips).
-_RULER_T = 18           # top ruler height / left ruler width grows for digits
+# Index ruler geometry (Elecard-style block index strips). Colours come from
+# the active theme (see _paint_ruler / apply_theme).
+_RULER_T = 18           # top ruler height
 _RULER_W = 34           # left ruler width
-_RULER_BG = QColor(46, 46, 46)
-_RULER_LINE = QColor(120, 120, 120)
-_RULER_TEXT = QColor(210, 210, 210)
-_RULER_CORNER = QColor(200, 90, 30)     # origin marker
 
 
 class _Ruler(QWidget):
@@ -160,7 +158,6 @@ class DecodedView(QWidget):
         # Info label at top
         self._info_label = QLabel("No frame loaded")
         self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._info_label.setStyleSheet("background-color: #333; color: #ccc; padding: 4px;")
         layout.addWidget(self._info_label)
 
         # Scroll area for the image. Not widget-resizable: we size the label to
@@ -176,7 +173,6 @@ class DecodedView(QWidget):
         self._image_label = _ImageLabel()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self._image_label.setStyleSheet("background-color: #1a1a1a;")
         self._image_label.mouse_moved.connect(self._on_mouse_moved)
         self._image_label.mouse_left.connect(self._on_mouse_left)
         self._image_label.clicked.connect(self._on_clicked)
@@ -192,8 +188,6 @@ class DecodedView(QWidget):
         self._corner = QWidget()
         self._corner.setFixedSize(_RULER_W, _RULER_T)
         self._corner.setAutoFillBackground(True)
-        self._corner.setStyleSheet(
-            f"background-color: {_RULER_CORNER.name()};")
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -209,6 +203,20 @@ class DecodedView(QWidget):
             self._update_rulers)
         self._scroll.verticalScrollBar().valueChanged.connect(
             self._update_rulers)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        """Re-apply theme-dependent chrome (info strip, image background, ruler
+        origin corner) and repaint the custom-painted rulers."""
+        t = current_theme()
+        self._info_label.setStyleSheet(
+            f"background-color: {t.hx(t.panel_bg)}; color: {t.hx(t.panel_fg)};"
+            f" padding: 4px;")
+        self._image_label.setStyleSheet(
+            f"background-color: {t.hx(t.canvas_bg)};")
+        self._corner.setStyleSheet(
+            f"background-color: {t.hx(t.ruler_corner)};")
+        self._update_rulers()
 
     def display_frame(self, rgb_array: np.ndarray, frame_index: int = -1,
                       analysis=None) -> None:
@@ -497,7 +505,8 @@ class DecodedView(QWidget):
     def _paint_ruler(self, ruler, painter: QPainter, horizontal: bool) -> None:
         """Draw block-index ticks/numbers on a ruler, aligned to the displayed
         image's position (accounts for zoom, scroll and centering)."""
-        painter.fillRect(ruler.rect(), _RULER_BG)
+        t = current_theme()
+        painter.fillRect(ruler.rect(), t.ruler_bg)
         shown = self._image_label.pixmap()
         if self._pixmap is None or shown is None or shown.width() == 0:
             return
@@ -523,13 +532,13 @@ class DecodedView(QWidget):
             pos = off_main + k * unit * scale
             if pos < -1 or pos > length + 1:
                 continue
-            painter.setPen(QPen(_RULER_LINE, 1))
+            painter.setPen(QPen(t.ruler_line, 1))
             if horizontal:
                 painter.drawLine(int(pos), _RULER_T - 5, int(pos), _RULER_T - 1)
             else:
                 painter.drawLine(_RULER_W - 5, int(pos), _RULER_W - 1, int(pos))
             if k % label_step == 0 and k < n:
-                painter.setPen(QPen(_RULER_TEXT, 1))
+                painter.setPen(QPen(t.ruler_text, 1))
                 s = str(k)
                 if horizontal:
                     painter.drawText(int(pos) + 2, _RULER_T - 6, s)

@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from ..core.frame_info import FrameInfo, FrameType
+from ..theme import current_theme
 from ..parsers.nalu_parser import NALUnit, NALUParser
 from ..parsers.h264_parser import H264Parser
 from ..parsers.h265_parser import H265Parser
@@ -34,7 +35,6 @@ class StreamViewer(QWidget):
 
         # Info label
         self._info_label = QLabel("No frame selected")
-        self._info_label.setStyleSheet("padding: 4px; background: #333; color: #ccc;")
         layout.addWidget(self._info_label)
 
         # Tree widget
@@ -54,28 +54,29 @@ class StreamViewer(QWidget):
         self._tree.setColumnWidth(0, 220)
         self._tree.setColumnWidth(1, 360)
 
-        # Style
-        self._tree.setStyleSheet("""
-            QTreeWidget {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
+        layout.addWidget(self._tree)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        """Theme the info strip and the NALU tree chrome."""
+        t = current_theme()
+        self._info_label.setStyleSheet(
+            f"padding: 4px; background: {t.hx(t.panel_bg)}; color: {t.hx(t.panel_fg)};")
+        self._tree.setStyleSheet(f"""
+            QTreeWidget {{
+                background-color: {t.hx(t.base)};
+                color: {t.hx(t.text)};
                 border: none;
-            }
-            QTreeWidget::item:selected {
-                background-color: #264f78;
-            }
-            QTreeWidget::item:hover {
-                background-color: #2a2d2e;
-            }
-            QHeaderView::section {
-                background-color: #333;
-                color: #ccc;
+            }}
+            QTreeWidget::item:selected {{ background-color: {t.hx(t.highlight)}; }}
+            QTreeWidget::item:hover {{ background-color: {t.hx(t.tree_hover)}; }}
+            QHeaderView::section {{
+                background-color: {t.hx(t.panel_bg)};
+                color: {t.hx(t.panel_fg)};
                 padding: 4px;
                 border: none;
-            }
+            }}
         """)
-
-        layout.addWidget(self._tree)
 
     def set_codec(self, codec_name: str, is_avc: bool = False, nal_length_size: int = 4) -> None:
         """Configure for H.264 or H.265 parsing."""

@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+from ..theme import current_theme
+
 
 class HexViewer(QWidget):
     """Displays hex dump of binary data."""
@@ -65,14 +67,6 @@ class HexViewer(QWidget):
         if not font.exactMatch():
             font = QFont("monospace", 10)
 
-        style = (
-            "QTextEdit {"
-            "  background-color: #1e1e1e;"
-            "  color: #d4d4d4;"
-            "  border: 1px solid #3c3c3c;"
-            "}"
-        )
-
         # Left pane: address column + hex bytes. Right pane: ASCII text.
         self._hex_edit = QTextEdit()
         self._ascii_edit = QTextEdit()
@@ -80,7 +74,7 @@ class HexViewer(QWidget):
             edit.setReadOnly(True)
             edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
             edit.setFont(font)
-            edit.setStyleSheet(style)
+        self.apply_theme()
 
         # The draggable divider trades width between hex and ASCII.
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -104,6 +98,18 @@ class HexViewer(QWidget):
         self._syncing = True
         target.verticalScrollBar().setValue(value)
         self._syncing = False
+
+    def apply_theme(self) -> None:
+        """Theme the two text panes (and re-render so default text colour and
+        spans update)."""
+        t = current_theme()
+        style = (f"QTextEdit {{ background-color: {t.hx(t.base)};"
+                 f" color: {t.hx(t.text)};"
+                 f" border: 1px solid {t.hx(t.border)}; }}")
+        self._hex_edit.setStyleSheet(style)
+        self._ascii_edit.setStyleSheet(style)
+        if getattr(self, "_data", None):
+            self._update_display()
 
     def set_data(self, data: bytes, highlight_start: int = -1,
                  highlight_end: int = -1, base_addr: int = 0) -> None:

@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint
 from PyQt6.QtGui import QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon
 
 from ..core.frame_info import FrameInfo, FrameType
+from ..theme import current_theme
 
 
 class BarChartWidget(QWidget):
@@ -89,15 +90,16 @@ class BarChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        t = current_theme()
         rect = self.rect()
         height = rect.height()
         available_height = height - 20  # Leave space for bottom margin
 
         # Background
-        painter.fillRect(rect, QColor(30, 30, 30))
+        painter.fillRect(rect, t.chart_bg)
 
         if not self._frames:
-            painter.setPen(QColor(100, 100, 100))
+            painter.setPen(t.chart_text_dim)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No frames loaded")
             return
 
@@ -169,11 +171,12 @@ class BarChartWidget(QWidget):
         def vline(i: int, double: bool) -> None:
             cx = 5 + i * step + self._bar_width / 2.0
             offsets = (-2.5, 2.5) if double else (0.0,)
+            t = current_theme()
             for o in offsets:
                 x = int(round(cx + o))
-                painter.setPen(QPen(QColor(235, 235, 235, 220), 4))
+                painter.setPen(QPen(t.cursor_halo, 4))
                 painter.drawLine(x, 0, x, height)
-                painter.setPen(QPen(QColor(0, 0, 0), 2))
+                painter.setPen(QPen(t.cursor_core, 2))
                 painter.drawLine(x, 0, x, height)
 
         if 0 <= self._selected_index < len(self._frames):
@@ -361,11 +364,12 @@ class LegendWidget(QWidget):
         return f"{n} B"
 
     def paintEvent(self, event):
+        t = current_theme()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(30, 30, 30))
+        painter.fillRect(self.rect(), t.chart_bg)
 
-        painter.setPen(QColor(200, 200, 200))
+        painter.setPen(t.chart_text)
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
@@ -385,15 +389,15 @@ class LegendWidget(QWidget):
         # Bitrate-line key.
         painter.setPen(QPen(self.BITRATE_COLOR, 2))
         painter.drawLine(6, y + 5, 16, y + 5)
-        painter.setPen(QColor(200, 200, 200))
+        painter.setPen(t.chart_text)
         painter.drawText(20, y + 9, "Bitrate")
         y += 22
 
         # Peak frame size (the full bar height corresponds to this).
         if self._max_frame_size > 0:
-            painter.setPen(QColor(150, 150, 150))
+            painter.setPen(t.chart_text_dim)
             painter.drawText(6, y + 9, "Max size")
-            painter.setPen(QColor(230, 230, 230))
+            painter.setPen(t.chart_text)
             painter.drawText(6, y + 24, self._human_size(self._max_frame_size))
 
 
