@@ -26,6 +26,7 @@ class StreamViewer(QWidget):
         self._h264_parser = H264Parser()
         self._h265_parser = H265Parser()
         self._is_h265 = False
+        self._nal_codec = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -80,12 +81,17 @@ class StreamViewer(QWidget):
 
     def set_codec(self, codec_name: str, is_avc: bool = False, nal_length_size: int = 4) -> None:
         """Configure for H.264 or H.265 parsing."""
-        self._is_h265 = codec_name.lower() in ('hevc', 'h265', 'h.265')
+        cn = codec_name.lower()
+        self._is_h265 = cn in ('hevc', 'h265', 'h.265')
+        # The NALU parser only understands H.264/HEVC Annex-B/AVCC. Other codecs
+        # (AV1 OBUs, etc.) must not be parsed as NAL or frame-type classification
+        # reads garbage (e.g. AV1 P-frames misdetected as I).
+        self._nal_codec = cn in ('h264', 'avc', 'h.264', 'hevc', 'h265', 'h.265')
         self._nalu_parser = NALUParser(
             is_h265=self._is_h265,
             is_avc=is_avc,
             nal_length_size=nal_length_size
-        )
+        ) if self._nal_codec else None
 
     def set_extradata(self, extradata: bytes) -> None:
         """Parse extradata (SPS/PPS from container) to populate parameter sets."""
