@@ -20,3 +20,9 @@ native/*.dll
 
 # Raw decode dumps (test artifacts)
 *.yuv
+
+# PyInstaller build outputs
+/build/
+/dist/
+*.spec
+!VideoEye.spec
