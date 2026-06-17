@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self._analysis_timer.timeout.connect(self._on_analysis_tick)
         self._last_ready = -1
         self._analysis_finalized = False
+        self._refs_pushed = False
 
         self._setup_ui()
         self._setup_menus()
@@ -477,6 +478,7 @@ class MainWindow(QMainWindow):
             # streams frames in decode order; overlays fill in as it advances.
             self._last_ready = -1
             self._analysis_finalized = False
+            self._refs_pushed = False
             self._analysis_label.setText("")
             self._analysis_timer.start()
 
@@ -790,6 +792,14 @@ class MainWindow(QMainWindow):
                 self._decoded_view.refresh_overlays(analysis)
                 self._frame_stats.set_analysis(analysis)
         self._last_ready = ready
+
+        # Once the sidecar is complete, build the reference-frame hierarchy under
+        # the frame bars (one pass over all frames; refs need them decoded).
+        if status == "done" and not self._refs_pushed:
+            n = len(self._demuxer.frames)
+            refs = [self._decoder.refs_for(i) or ([], []) for i in range(n)]
+            self._barchart_view.set_all_refs(refs)
+            self._refs_pushed = True
 
         if terminal:
             self._analysis_finalized = True

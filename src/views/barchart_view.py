@@ -1,7 +1,9 @@
 """Frame bar chart visualization."""
 
+import math
+
 from PyQt6.QtWidgets import QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QLabel
-from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QRect, QPoint, QPointF
 from PyQt6.QtGui import QPainter, QColor, QPen, QMouseEvent, QWheelEvent, QPolygon
 
 from ..core.frame_info import FrameInfo, FrameType
@@ -405,6 +407,147 @@ class LegendWidget(QWidget):
             painter.drawText(6, y + 24, self._human_size(self._max_frame_size))
 
 
+class HierarchyWidget(QWidget):
+    """Reference-frame hierarchy graph drawn under the size bars (Elecard-style).
+
+    Each frame is a node placed at its bar's x and a y given by its temporal
+    layer (anchors at the bottom, hierarchical-B frames higher); green edges link
+    a frame to its reference frames. The temporal layer is derived from the
+    reference structure (no temporal_id needed): level = log2(base GOP span /
+    nearest reference distance in display order), so an I/P anchor lands on the
+    base row and each B-pyramid split rises one row.
+    """
+
+    HEIGHT = 104
+    _EDGE = QColor(40, 160, 60)
+    _SEL = QColor(220, 40, 40)
+
+    frame_clicked = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frames: list[FrameInfo] = []
+        self._refs: list[tuple] = []        # per index: (l0_list, l1_list)
+        self._levels: list[int] = []
+        self._max_level = 0
+        self._bar_width = 8
+        self._bar_spacing = 2
+        self._selected = -1
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+
+    def set_frames(self, frames: list[FrameInfo]) -> None:
+        self._frames = frames
+        self._refs = []
+        self._compute_levels()
+        self._update_size()
+        self.update()
+
+    def set_refs(self, refs: list[tuple]) -> None:
+        """refs[i] = (l0_indices, l1_indices) for frame i (chart index space)."""
+        self._refs = refs
+        self._compute_levels()
+        self.update()
+
+    def set_bar_width(self, width: int) -> None:
+        self._bar_width = max(1, width)
+        self._update_size()
+        self.update()
+
+    def set_selected(self, index: int) -> None:
+        if index != self._selected:
+            self._selected = index
+            self.update()
+
+    def _step(self) -> int:
+        return self._bar_width + self._bar_spacing
+
+    def _update_size(self) -> None:
+        self.setMinimumWidth(max(100, 5 + len(self._frames) * self._step() + 5))
+
+    def _disp_key(self, i: int) -> int:
+        f = self._frames[i]
+        if f.poc is not None:
+            return f.poc
+        if f.pts is not None:
+            return f.pts
+        return f.index
+
+    def _compute_levels(self) -> None:
+        n = len(self._frames)
+        self._levels = [0] * n
+        self._max_level = 0
+        if not self._refs or len(self._refs) != n:
+            return
+        keys = [self._disp_key(i) for i in range(n)]
+        nearest = [0] * n
+        for i in range(n):
+            l0, l1 = self._refs[i]
+            rs = [r for r in (*l0, *l1) if 0 <= r < n]
+            if rs:
+                nearest[i] = min(abs(keys[i] - keys[r]) for r in rs) or 1
+        gap = max(nearest) or 1
+        for i in range(n):
+            if nearest[i] <= 0:
+                self._levels[i] = 0
+            else:
+                self._levels[i] = max(0, round(math.log2(gap / nearest[i])))
+        self._max_level = max(self._levels) if self._levels else 0
+
+    def _node_xy(self, i: int):
+        cx = 5 + i * self._step() + self._bar_width / 2.0
+        rows = max(1, self._max_level)
+        row_h = (self.HEIGHT - 20) / rows
+        cy = self.HEIGHT - 10 - self._levels[i] * row_h
+        return cx, cy
+
+    def _index_at(self, x: int) -> int:
+        i = (x - 5) // self._step()
+        return i if 0 <= i < len(self._frames) else -1
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            i = self._index_at(int(event.position().x()))
+            if i >= 0:
+                self.frame_clicked.emit(i)
+
+    def paintEvent(self, event):
+        t = current_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), t.chart_bg)
+        n = len(self._frames)
+        if n == 0 or len(self._levels) != n:
+            return
+        step = self._step()
+        dirty = event.rect()
+        first = max(0, (dirty.left() - 5) // step - 2)
+        last = min(n - 1, (dirty.right() - 5) // step + 2)
+
+        # Edges first (under the nodes). Only for visible source frames.
+        for i in range(first, last + 1):
+            if not self._refs or len(self._refs) != n:
+                break
+            sx, sy = self._node_xy(i)
+            sel = (i == self._selected)
+            painter.setPen(QPen(self._SEL if sel else self._EDGE,
+                                1.4 if sel else 0.8))
+            l0, l1 = self._refs[i]
+            for r in (*l0, *l1):
+                if 0 <= r < n:
+                    rx, ry = self._node_xy(r)
+                    painter.drawLine(int(sx), int(sy), int(rx), int(ry))
+
+        # Nodes on top.
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i in range(first, last + 1):
+            cx, cy = self._node_xy(i)
+            sel = (i == self._selected)
+            painter.setBrush(self._SEL if sel else self._EDGE)
+            rad = 4.0 if sel else 2.6
+            painter.drawEllipse(QPointF(cx, cy), rad, rad)
+
+
 class BarChartView(QWidget):
     """Scrollable bar chart view with a fixed legend on the left."""
 
@@ -430,25 +573,40 @@ class BarChartView(QWidget):
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
-        # Chart widget
+        # Chart + reference-hierarchy stacked in one scrolled container so they
+        # share horizontal scroll and stay x-aligned.
         self._chart = BarChartWidget()
         self._chart.frame_selected.connect(self.frame_selected)
+        self._hierarchy = HierarchyWidget()
+        self._hierarchy.frame_clicked.connect(self.frame_selected)
 
-        self._scroll.setWidget(self._chart)
+        container = QWidget()
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self._chart, 1)
+        cl.addWidget(self._hierarchy)
+        self._scroll.setWidget(container)
         layout.addWidget(self._scroll)
 
     def set_frames(self, frames: list[FrameInfo]) -> None:
         """Set frame data for visualization."""
         self._chart.set_frames(frames)
+        self._hierarchy.set_frames(frames)
         self._legend.set_max_frame_size(self._chart.max_frame_size if frames else 0)
 
     def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
         """Mark the selected frame's L0/L1 reference frames on the chart."""
         self._chart.set_ref_markers(l0, l1)
 
+    def set_all_refs(self, refs: list[tuple]) -> None:
+        """Per-frame (l0, l1) reference indices for the hierarchy graph."""
+        self._hierarchy.set_refs(refs)
+
     def select_frame(self, index: int) -> None:
         """Select a frame and scroll to make it visible."""
         self._chart.select_frame(index)
+        self._hierarchy.set_selected(index)
 
         # Scroll to make selected frame visible
         if index >= 0:
@@ -461,6 +619,7 @@ class BarChartView(QWidget):
     def set_bar_width(self, width: int) -> None:
         """Set bar width."""
         self._chart.set_bar_width(width)
+        self._hierarchy.set_bar_width(self._chart._bar_width)
 
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zooming."""
@@ -468,10 +627,8 @@ class BarChartView(QWidget):
             # Zoom with Ctrl+wheel
             delta = event.angleDelta().y()
             current_width = self._chart._bar_width
-            if delta > 0:
-                self._chart.set_bar_width(current_width + 1)
-            else:
-                self._chart.set_bar_width(current_width - 1)
+            self._chart.set_bar_width(current_width + (1 if delta > 0 else -1))
+            self._hierarchy.set_bar_width(self._chart._bar_width)
             event.accept()
         else:
             # Normal horizontal scroll
@@ -480,6 +637,7 @@ class BarChartView(QWidget):
     def clear(self) -> None:
         """Clear the chart."""
         self._chart.set_frames([])
+        self._hierarchy.set_frames([])
         self._legend.set_max_frame_size(0)
 
     @property
