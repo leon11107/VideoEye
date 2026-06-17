@@ -1,17 +1,18 @@
 """Block analysis panels:
 
-- OverlayControls: overlay toggles (QP / MV / Partition CU·PU·TU / Types).
+- OverlayToolBar: overlay toggles as a text-button row (Boundary / Partition /
+  Mode / Type / Bits / QP) for the main toolbar; groups expand sub-layers via a
+  dropdown menu.
 - BlockHoverPanel: Elecard-style name|value table for the block under cursor.
-- OverlayPanel: the two above stacked in one widget (the "Overlays" tab), so
-  hovering the canvas updates the block table beside the toggles.
+- OverlayPanel: wraps the hover table (the "Block Info" dock).
 - FrameStatsPanel: per-frame statistics.
 """
 
 import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtGui import QAction, QBrush, QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QToolButton,
+    QHBoxLayout, QLabel, QMenu, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
@@ -65,90 +66,78 @@ def _kv_row(parent: QTreeWidgetItem, name: str, value: str) -> None:
 _EXCLUSIVE_GROUPS = {"bits"}
 
 
-class OverlayControls(QWidget):
-    """Overlay enable/disable toggles."""
+# Order + short labels for the toolbar row, mirroring Elecard's left-to-right
+# boundary / partition / mv / type / bits / extend(qp) layout.
+_TOOLBAR_ORDER = (
+    ("boundary", "Boundary"),
+    ("partition", "Partition"),
+    ("mode", "Mode"),
+    ("types", "Type"),
+    ("bits", "Bits"),
+    ("qp", "QP"),
+)
+
+
+class OverlayToolBar(QWidget):
+    """Overlay toggles as a row of text buttons with dropdown sub-options, for
+    the main toolbar (next to FPS). Each category is a checkable button (the
+    group master / flat overlay); groups add a dropdown menu of checkable
+    sub-layers. Same overlays_changed / overlay_flags API as OverlayControls."""
 
     overlays_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._checkboxes: dict[str, QCheckBox] = {}
+        # key -> a checkable source: QToolButton for masters/flat overlays,
+        # QAction for sub-layers. overlay_flags() reports every registered key.
+        self._sources: dict[str, object] = {}
         self._setup_ui()
-        # Stay compact: the toggles sit above the hover panel in the shared
-        # Overlays tab, so the controls should take only their natural height.
-        self.setSizePolicy(QSizePolicy.Policy.Preferred,
-                           QSizePolicy.Policy.Maximum)
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        for key, label in _TOOLBAR_ORDER:
+            subs = OVERLAY_GROUPS[key][1] if key in OVERLAY_GROUPS else ()
+            self._add_button(layout, key, label, subs)
 
-        # Independent flat overlays.
-        for key, (label, _render) in OVERLAYS.items():
-            cb = QCheckBox(label)
-            cb.setChecked(key in DEFAULT_ON)  # before connect: no startup emit
-            cb.toggled.connect(self._on_toggled)
-            layout.addWidget(cb)
-            self._checkboxes[key] = cb
-
-        # Collapsible groups (Partition / Mode / Boundary): a master checkbox +
-        # an expand arrow revealing the sub-layer options.
-        for master, (label, subs, _fn) in OVERLAY_GROUPS.items():
-            self._add_group(layout, master, label, subs)
-
-    def _add_group(self, layout, master_key: str, label: str, subs) -> None:
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
+    def _add_button(self, layout, master_key: str, label: str, subs) -> None:
         btn = QToolButton()
+        btn.setObjectName("overlayBtn")  # themed checked/hover state
+        btn.setText(label)
         btn.setCheckable(True)
-        btn.setStyleSheet("QToolButton { border: none; }")
-        btn.setArrowType(Qt.ArrowType.RightArrow)
-        master_cb = QCheckBox(label)
-        master_cb.setChecked(master_key in DEFAULT_ON)
-        master_cb.toggled.connect(self._on_toggled)
-        self._checkboxes[master_key] = master_cb
-        row.addWidget(master_cb)
-        row.addWidget(btn)
-        row.addStretch()
-        layout.addLayout(row)
+        btn.setChecked(master_key in DEFAULT_ON)  # before connect: no startup emit
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.toggled.connect(self._on_toggled)
+        self._sources[master_key] = btn
 
-        container = QWidget()
-        sub_layout = QVBoxLayout(container)
-        sub_layout.setContentsMargins(28, 0, 0, 0)  # indent under the master
-        exclusive = master_key in _EXCLUSIVE_GROUPS
-        sub_cbs = []
-        for key, sub_label in subs:
-            cb = QCheckBox(sub_label)
-            cb.setChecked(key in DEFAULT_ON)
-            sub_layout.addWidget(cb)
-            self._checkboxes[key] = cb
-            sub_cbs.append(cb)
-        # Exclusive groups (e.g. Bit Size) behave like radio buttons: checking
-        # one clears its siblings. Others allow any combination.
-        for cb in sub_cbs:
-            if exclusive:
-                cb.toggled.connect(
-                    lambda chk, c=cb, g=sub_cbs: self._on_exclusive(chk, c, g))
-            else:
-                cb.toggled.connect(self._on_toggled)
-        container.setVisible(False)            # hidden until expanded
-        container.setEnabled(master_cb.isChecked())
-        master_cb.toggled.connect(container.setEnabled)
-        btn.toggled.connect(
-            lambda exp, b=btn, c=container: self._toggle_group(exp, b, c))
-        layout.addWidget(container)
+        if subs:
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            menu = QMenu(btn)
+            exclusive = master_key in _EXCLUSIVE_GROUPS
+            acts = []
+            for key, sub_label in subs:
+                act = QAction(sub_label, menu)
+                act.setCheckable(True)
+                act.setChecked(key in DEFAULT_ON)
+                menu.addAction(act)
+                self._sources[key] = act
+                acts.append(act)
+            # Exclusive groups (Bit Size) act like radio buttons; unchecking the
+            # active one is allowed (shows none). Others allow any combination.
+            for act in acts:
+                if exclusive:
+                    act.toggled.connect(
+                        lambda chk, a=act, g=acts: self._on_exclusive(chk, a, g))
+                else:
+                    act.toggled.connect(self._on_toggled)
+            btn.setMenu(menu)
+        layout.addWidget(btn)
 
-    def _toggle_group(self, expanded: bool, btn, container) -> None:
-        container.setVisible(expanded)
-        btn.setArrowType(
-            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-
-    def _on_exclusive(self, checked, cb, group) -> None:
-        """Radio-style: when a sub is checked, clear its siblings (then emit a
-        single update). Unchecking the active one is allowed (shows none)."""
+    def _on_exclusive(self, checked, act, group) -> None:
         if checked:
             for other in group:
-                if other is not cb and other.isChecked():
+                if other is not act and other.isChecked():
                     other.blockSignals(True)
                     other.setChecked(False)
                     other.blockSignals(False)
@@ -158,33 +147,21 @@ class OverlayControls(QWidget):
         self.overlays_changed.emit(self.overlay_flags())
 
     def overlay_flags(self) -> dict:
-        return {key: cb.isChecked() for key, cb in self._checkboxes.items()}
+        return {key: src.isChecked() for key, src in self._sources.items()}
 
 
 class OverlayPanel(QWidget):
-    """Overlay toggles with the live block-info table beneath them.
+    """The live block-info table for the region under the cursor.
 
-    Combining both in one tab lets the cursor's block details update in place
-    next to the overlay switches: enable an overlay, then hover the canvas and
-    the same panel shows that region's coding info. Forwards the controls'
-    signals/API so callers treat it like the old OverlayControls plus a hover
-    sink (set_hover / clear_hover)."""
+    The overlay toggles now live in the main toolbar (OverlayToolBar); this
+    panel shows the coding details of whatever the cursor is over, updating in
+    place as you hover the canvas."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        self.controls = OverlayControls()
-        self.overlays_changed = self.controls.overlays_changed
-        self.overlay_flags = self.controls.overlay_flags
-        layout.addWidget(self.controls)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(divider)
 
         heading = QLabel("Block Info (cursor)")
         heading.setContentsMargins(8, 4, 8, 2)

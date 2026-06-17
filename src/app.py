@@ -22,7 +22,7 @@ from .views.barchart_view import BarChartView
 from .views.decoded_view import DecodedView
 from .views.stream_viewer import StreamViewer
 from .views.hex_viewer import HexViewer
-from .views.block_info_view import OverlayPanel, FrameStatsPanel
+from .views.block_info_view import OverlayPanel, OverlayToolBar, FrameStatsPanel
 
 
 class MainWindow(QMainWindow):
@@ -94,10 +94,11 @@ class MainWindow(QMainWindow):
         stream_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, stream_dock)
 
+        # Overlay toggles now live in the main toolbar (see _setup_toolbar);
+        # this dock just shows the cursor's block info.
         self._overlay_panel = OverlayPanel()
-        self._overlay_controls = self._overlay_panel.controls
         self._block_hover = self._overlay_panel.hover
-        overlay_dock = QDockWidget("Overlays", self)
+        overlay_dock = QDockWidget("Block Info", self)
         overlay_dock.setWidget(self._overlay_panel)
         overlay_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, overlay_dock)
@@ -364,6 +365,13 @@ class MainWindow(QMainWindow):
         self._fps_spin.valueChanged.connect(self._on_fps_changed)
         self._fps_spin.setFixedWidth(60)
         toolbar.addWidget(self._fps_spin)
+
+        # Overlay toggles (Elecard-style category buttons with dropdown
+        # sub-layers), next to the FPS control.
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Overlays: "))
+        self._overlay_controls = OverlayToolBar()
+        toolbar.addWidget(self._overlay_controls)
 
     def _setup_connections(self):
         """Set up signal connections between views."""

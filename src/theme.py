@@ -193,6 +193,17 @@ def build_stylesheet(t: Theme) -> str:
             image: url("{_CHECK_SVG}");
         }}
         QCheckBox::indicator:disabled {{ border-color: {t.hx(t.disabled_text)}; }}
+        QToolButton#overlayBtn {{
+            padding: 3px 8px; border: 1px solid {t.hx(t.border)};
+            border-radius: 3px; background-color: {t.hx(t.button)};
+            color: {t.hx(t.text)}; }}
+        QToolButton#overlayBtn:hover {{ border-color: {t.hx(t.highlight)}; }}
+        QToolButton#overlayBtn:checked {{
+            background-color: {t.hx(t.highlight)};
+            color: {t.hx(t.highlight_text)};
+            border-color: {t.hx(t.highlight)}; }}
+        QToolButton#overlayBtn::menu-button {{
+            width: 14px; border-left: 1px solid {t.hx(t.border)}; }}
     """
 
 
