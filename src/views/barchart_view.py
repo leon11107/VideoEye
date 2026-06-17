@@ -411,11 +411,11 @@ class HierarchyWidget(QWidget):
     """Reference-frame hierarchy graph drawn under the size bars (Elecard-style).
 
     Each frame is a node placed at its bar's x and a y given by its temporal
-    layer (anchors at the bottom, hierarchical-B frames higher); green edges link
-    a frame to its reference frames. The temporal layer is derived from the
-    reference structure (no temporal_id needed): level = log2(base GOP span /
-    nearest reference distance in display order), so an I/P anchor lands on the
-    base row and each B-pyramid split rises one row.
+    layer (anchors on the top row, hierarchical-B frames hang lower -- matching
+    Elecard); green edges link a frame to its reference frames. The temporal
+    layer is derived from the reference structure (no temporal_id needed):
+    level = log2(base GOP span / nearest reference distance in display order),
+    so an I/P anchor lands on the top row and each B-pyramid split drops a row.
     """
 
     HEIGHT = 104
@@ -430,8 +430,10 @@ class HierarchyWidget(QWidget):
         self._refs: list[tuple] = []        # per index: (l0_list, l1_list)
         self._levels: list[int] = []
         self._max_level = 0
-        self._bar_width = 8
-        self._bar_spacing = 2
+        # Keep these identical to BarChartWidget so nodes sit exactly under
+        # their bars; BarChartView syncs them whenever the chart's change.
+        self._bar_width = 4
+        self._bar_spacing = 1
         self._selected = -1
         self.setFixedHeight(self.HEIGHT)
         self.setMouseTracking(True)
@@ -498,7 +500,8 @@ class HierarchyWidget(QWidget):
         cx = 5 + i * self._step() + self._bar_width / 2.0
         rows = max(1, self._max_level)
         row_h = (self.HEIGHT - 20) / rows
-        cy = self.HEIGHT - 10 - self._levels[i] * row_h
+        # Level 0 (I/P anchors) on the top row; deeper B layers hang lower.
+        cy = 10 + self._levels[i] * row_h
         return cx, cy
 
     def _index_at(self, x: int) -> int:
@@ -619,6 +622,7 @@ class BarChartView(QWidget):
     def set_bar_width(self, width: int) -> None:
         """Set bar width."""
         self._chart.set_bar_width(width)
+        self._hierarchy._bar_spacing = self._chart._bar_spacing
         self._hierarchy.set_bar_width(self._chart._bar_width)
 
     def wheelEvent(self, event: QWheelEvent):
@@ -628,6 +632,7 @@ class BarChartView(QWidget):
             delta = event.angleDelta().y()
             current_width = self._chart._bar_width
             self._chart.set_bar_width(current_width + (1 if delta > 0 else -1))
+            self._hierarchy._bar_spacing = self._chart._bar_spacing
             self._hierarchy.set_bar_width(self._chart._bar_width)
             event.accept()
         else:
