@@ -345,29 +345,21 @@ class BarChartWidget(QWidget):
 
 
 class LegendWidget(QWidget):
-    """Fixed legend panel: frame-type colors, the bitrate-line key, and the
-    stream's peak frame size (the bars' full-height reference)."""
+    """Fixed legend panel: frame-type colors, the bitrate-line key, and a
+    clickable toggle for the reference-hierarchy graph (off by default)."""
 
     BITRATE_COLOR = QColor(255, 200, 40)
+    HIERARCHY_COLOR = QColor(40, 160, 60)  # matches HierarchyWidget._EDGE
+
+    hierarchy_toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(92)
         self.setMinimumHeight(60)
-        self._max_frame_size = 0
-
-    def set_max_frame_size(self, size: int) -> None:
-        if size != self._max_frame_size:
-            self._max_frame_size = size
-            self.update()
-
-    @staticmethod
-    def _human_size(n: int) -> str:
-        if n >= 1 << 20:
-            return f"{n / (1 << 20):.2f} MB"
-        if n >= 1 << 10:
-            return f"{n / (1 << 10):.1f} KB"
-        return f"{n} B"
+        self._hierarchy_visible = False
+        self._hier_hit = QRect()  # clickable area for the hierarchy toggle
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def paintEvent(self, event):
         t = current_theme()
@@ -399,12 +391,27 @@ class LegendWidget(QWidget):
         painter.drawText(20, y + 9, "Bitrate")
         y += 22
 
-        # Peak frame size (the full bar height corresponds to this).
-        if self._max_frame_size > 0:
-            painter.setPen(t.chart_text_dim)
-            painter.drawText(6, y + 9, "Max size")
-            painter.setPen(t.chart_text)
-            painter.drawText(6, y + 24, self._human_size(self._max_frame_size))
+        # Hierarchy toggle: a checkbox + green line key, click to show/hide.
+        self._hier_hit = QRect(2, y - 2, self.width() - 4, 18)
+        box = QRect(6, y, 10, 10)
+        painter.setPen(QPen(t.chart_text_dim, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(box)
+        if self._hierarchy_visible:
+            painter.setPen(QPen(self.HIERARCHY_COLOR, 2))
+            painter.drawLine(box.left() + 1, box.center().y() + 1,
+                             box.right() - 1, box.center().y() + 1)
+        painter.setPen(QPen(self.HIERARCHY_COLOR, 2))
+        painter.drawLine(20, y + 5, 30, y + 5)
+        painter.setPen(t.chart_text if self._hierarchy_visible else t.chart_text_dim)
+        painter.drawText(34, y + 9, "Refs")
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._hier_hit.contains(event.position().toPoint())):
+            self._hierarchy_visible = not self._hierarchy_visible
+            self.update()
+            self.hierarchy_toggled.emit(self._hierarchy_visible)
 
 
 class HierarchyWidget(QWidget):
@@ -592,6 +599,8 @@ class BarChartView(QWidget):
         self._chart.frame_selected.connect(self.frame_selected)
         self._hierarchy = HierarchyWidget()
         self._hierarchy.frame_clicked.connect(self.frame_selected)
+        self._hierarchy.setVisible(False)  # off by default; toggled via legend
+        self._legend.hierarchy_toggled.connect(self._hierarchy.setVisible)
 
         container = QWidget()
         cl = QVBoxLayout(container)
@@ -606,7 +615,6 @@ class BarChartView(QWidget):
         """Set frame data for visualization."""
         self._chart.set_frames(frames)
         self._hierarchy.set_frames(frames)
-        self._legend.set_max_frame_size(self._chart.max_frame_size if frames else 0)
 
     def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
         """Mark the selected frame's L0/L1 reference frames on the chart."""
@@ -653,7 +661,6 @@ class BarChartView(QWidget):
         """Clear the chart."""
         self._chart.set_frames([])
         self._hierarchy.set_frames([])
-        self._legend.set_max_frame_size(0)
 
     @property
     def selected_index(self) -> int:
