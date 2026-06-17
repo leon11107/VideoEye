@@ -297,6 +297,21 @@ class BarChartWidget(QWidget):
             else:
                 self.setToolTip("")
 
+    def set_hover(self, index: int) -> None:
+        """Set the hovered frame from an external source (e.g. the hierarchy)
+        without re-emitting hover_changed, so the two widgets stay in sync
+        without a signal loop."""
+        if index == self._hover_index:
+            return
+        old = self._hover_index
+        self._hover_index = index
+        for i in (old, index):
+            if i >= 0:
+                self.update(self._bar_rect(i))
+        rb = self._ref_bounds()
+        if rb is not None:
+            self.update(rb)
+
     def leaveEvent(self, event):
         """Handle mouse leaving widget."""
         if self._hover_index != -1:
@@ -434,6 +449,7 @@ class HierarchyWidget(QWidget):
     _SEL = QColor(220, 40, 40)
 
     frame_clicked = pyqtSignal(int)
+    hover_changed = pyqtSignal(int)   # hovered frame index (-1 = none)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -531,6 +547,20 @@ class HierarchyWidget(QWidget):
             if i >= 0:
                 self.frame_clicked.emit(i)
 
+    def mouseMoveEvent(self, event: QMouseEvent):
+        """Hovering the hierarchy drives the cursor too (not just the bars)."""
+        i = self._index_at(int(event.position().x()))
+        if i != self._hover:
+            self._hover = i
+            self.update()
+            self.hover_changed.emit(i)
+
+    def leaveEvent(self, event):
+        if self._hover != -1:
+            self._hover = -1
+            self.update()
+            self.hover_changed.emit(-1)
+
     def paintEvent(self, event):
         t = current_theme()
         painter = QPainter(self)
@@ -621,8 +651,11 @@ class BarChartView(QWidget):
         self._hierarchy.frame_clicked.connect(self.frame_selected)
         self._hierarchy.setVisible(False)  # off by default; toggled via legend
         self._legend.hierarchy_toggled.connect(self._hierarchy.setVisible)
-        # Mirror the chart's hover so its double-line cursor extends downward.
+        # Mirror hover both ways so the cursor tracks the mouse over either the
+        # bars or the hierarchy. The set_hover setters don't re-emit, so there's
+        # no signal loop.
         self._chart.hover_changed.connect(self._hierarchy.set_hover)
+        self._hierarchy.hover_changed.connect(self._chart.set_hover)
 
         container = QWidget()
         cl = QVBoxLayout(container)
