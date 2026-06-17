@@ -322,17 +322,30 @@ class Demuxer:
     }
 
     def _refine_types_via_decode(self, progress_cb=None) -> None:
-        """Override frame types with the decoder's pict_type, keyed by PTS."""
-        any_pts = any(f.pts is not None for f in self._frames)
-        if not any_pts:
-            return  # raw stream without timestamps: nothing to key on
+        """Override frame types with the decoder's authoritative pict_type.
+
+        Hand-parsing slice headers (esp. HEVC) is unreliable, so we trust the
+        decoder's pict_type. The hard part is mapping each decoded frame back to
+        our FrameInfo list, because the decoder emits in display order while our
+        list is in decode order:
+
+        - Container streams: key by PTS (survives reordering, 1:1 and robust).
+        - Raw streams (no PTS): the decoder still emits in display order, and our
+          frames carry a continuous display key (.poc, from poc_tracker). So we
+          sort our frames into display order and zip with the emission order.
+          This only runs when every frame has a unique poc and the counts match;
+          otherwise we leave the slice-parsed types untouched (a partial mapping
+          is worse than none).
+        """
         try:
             cont = av.open(self._file_path)
             stream = next((s for s in cont.streams if s.type == "video"), None)
             if stream is None:
                 cont.close()
                 return
+            any_pts = any(f.pts is not None for f in self._frames)
             by_pts = {}
+            display_types = []
             done = 0
             total = len(self._frames)
             for frame in cont.decode(stream):
@@ -340,15 +353,31 @@ class Demuxer:
                     ft = self._PICT_TYPE_MAP.get(int(frame.pict_type))
                 except (TypeError, ValueError):
                     ft = None
-                if ft is not None and frame.pts is not None:
-                    by_pts[frame.pts] = ft
+                if any_pts:
+                    if ft is not None and frame.pts is not None:
+                        by_pts[frame.pts] = ft
+                else:
+                    display_types.append(ft)
                 done += 1
                 if progress_cb is not None and (done & 0x3F) == 0:
                     progress_cb("classify", done, total)
             cont.close()
-            for f in self._frames:
-                if f.pts in by_pts:
-                    f.frame_type = by_pts[f.pts]
+
+            if any_pts:
+                for f in self._frames:
+                    if f.pts in by_pts:
+                        f.frame_type = by_pts[f.pts]
+                return
+
+            # Raw stream: align by display order via .poc.
+            pocs = [f.poc for f in self._frames]
+            if (None not in pocs
+                    and len(set(pocs)) == len(pocs)
+                    and len(display_types) == len(self._frames)):
+                for f, ft in zip(sorted(self._frames, key=lambda x: x.poc),
+                                 display_types):
+                    if ft is not None:
+                        f.frame_type = ft
         except Exception as e:
             print(f"Error refining frame types via decode: {e}")
 
