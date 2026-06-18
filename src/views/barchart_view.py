@@ -27,7 +27,7 @@ class BarChartWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._frames: list[FrameInfo] = []
-        self._bar_width = 4
+        self._bar_width = 8  # default bar width (2x the original 4)
         self._bar_spacing = 1
         self._max_frame_size = 1
         self._max_bitrate = 1  # peak instantaneous bitrate (bps), for the line
@@ -474,7 +474,7 @@ class HierarchyWidget(QWidget):
         self._max_level = 0
         # Keep these identical to BarChartWidget so nodes sit exactly under
         # their bars; BarChartView syncs them whenever the chart's change.
-        self._bar_width = 4
+        self._bar_width = 8
         self._bar_spacing = 1
         self._selected = -1
         self._hover = -1
