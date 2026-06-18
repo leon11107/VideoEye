@@ -9,7 +9,7 @@
 """
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QAction, QBrush, QColor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QMenu, QToolButton,
@@ -91,7 +91,11 @@ class OverlayToolBar(QWidget):
         # key -> a checkable source: QToolButton for masters/flat overlays,
         # QAction for sub-layers. overlay_flags() reports every registered key.
         self._sources: dict[str, object] = {}
+        self._chips: list[QToolButton] = []
         self._setup_ui()
+        # Equalize chip widths once polished (sizeHint needs the stylesheet's
+        # padding applied), so all buttons render the same size.
+        QTimer.singleShot(0, self._equalize_widths)
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -100,6 +104,13 @@ class OverlayToolBar(QWidget):
         for key, label in _TOOLBAR_ORDER:
             subs = OVERLAY_GROUPS[key][1] if key in OVERLAY_GROUPS else ()
             self._add_button(layout, key, label, subs)
+
+    def _equalize_widths(self) -> None:
+        if not self._chips:
+            return
+        w = max(c.sizeHint().width() for c in self._chips)
+        for c in self._chips:
+            c.setFixedWidth(w)
 
     def _add_button(self, layout, master_key: str, label: str, subs) -> None:
         btn = QToolButton()
@@ -111,6 +122,7 @@ class OverlayToolBar(QWidget):
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.toggled.connect(self._on_toggled)
         self._sources[master_key] = btn
+        self._chips.append(btn)
 
         if subs:
             btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
