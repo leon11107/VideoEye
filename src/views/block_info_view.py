@@ -9,7 +9,7 @@
 """
 
 import numpy as np
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QSize
 from PyQt6.QtGui import QAction, QBrush, QColor
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QMenu, QToolButton,
@@ -21,6 +21,8 @@ from ..analysis import (
     h264_intra_mode_name, h264_mb_type_label,
 )
 from .overlay import OVERLAYS, DEFAULT_ON, OVERLAY_GROUPS
+from .overlay_icons import overlay_icon
+from ..theme import current_theme
 
 # Elecard-like section header coloring.
 _SECTION_BG = QColor("#2d5a88")
@@ -79,12 +81,14 @@ _TOOLBAR_ORDER = (
 
 
 class OverlayToolBar(QWidget):
-    """Overlay toggles as a row of text buttons with dropdown sub-options, for
-    the main toolbar (next to FPS). Each category is a checkable button (the
-    group master / flat overlay); groups add a dropdown menu of checkable
-    sub-layers. Same overlays_changed / overlay_flags API as OverlayControls."""
+    """Overlay toggles as a row of icon chips with dropdown sub-options, for the
+    main toolbar (next to FPS). Each category is a checkable icon button (the
+    group master / flat overlay), tinted white over the highlight pill when on;
+    groups add a dropdown menu of checkable sub-layers. Same overlays_changed /
+    overlay_flags API as OverlayControls."""
 
     overlays_changed = pyqtSignal(dict)
+    _ICON_PX = 18
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -92,10 +96,23 @@ class OverlayToolBar(QWidget):
         # QAction for sub-layers. overlay_flags() reports every registered key.
         self._sources: dict[str, object] = {}
         self._chips: list[QToolButton] = []
+        self._icon_btns: list[tuple] = []   # (button, key) for theme retinting
         self._setup_ui()
+        self._retint_icons()
         # Equalize chip widths once polished (sizeHint needs the stylesheet's
         # padding applied), so all buttons render the same size.
         QTimer.singleShot(0, self._equalize_widths)
+
+    def _retint_icons(self) -> None:
+        """(Re)build every chip's icon for the current theme: theme text color
+        when off, highlight text (white) when checked."""
+        t = current_theme()
+        for btn, key in self._icon_btns:
+            btn.setIcon(overlay_icon(key, t.text, t.highlight_text,
+                                     self._ICON_PX))
+
+    def apply_theme(self) -> None:
+        self._retint_icons()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -115,14 +132,16 @@ class OverlayToolBar(QWidget):
     def _add_button(self, layout, master_key: str, label: str, subs) -> None:
         btn = QToolButton()
         btn.setObjectName("overlayChip")  # themed flat pill (checked = filled)
-        btn.setText(label)
+        btn.setToolTip(label)             # name on hover (icon-only buttons)
+        btn.setIconSize(QSize(self._ICON_PX, self._ICON_PX))
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         btn.setCheckable(True)
         btn.setChecked(master_key in DEFAULT_ON)  # before connect: no startup emit
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.toggled.connect(self._on_toggled)
         self._sources[master_key] = btn
         self._chips.append(btn)
+        self._icon_btns.append((btn, master_key))  # icon set in _retint_icons
 
         if subs:
             btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
