@@ -176,7 +176,7 @@ class BarChartWidget(QWidget):
         def vline(i: int, double: bool) -> None:
             cx = 5 + i * step + self._bar_width / 2.0
             # Hover = two thin lines; current frame = one slightly bolder line.
-            offsets = (-2.0, 2.0) if double else (0.0,)
+            offsets = (-1.5, 1.5) if double else (0.0,)
             halo_w = 2 if double else 3
             core_w = 1 if double else 2
             for o in offsets:
@@ -617,7 +617,7 @@ class HierarchyWidget(QWidget):
         # = single line; hovered frame = double line. Matches _draw_cursors.
         def vline(i: int, double: bool) -> None:
             cx = 5 + i * step + self._bar_width / 2.0
-            offsets = (-2.0, 2.0) if double else (0.0,)
+            offsets = (-1.5, 1.5) if double else (0.0,)
             halo_w = 2 if double else 3
             core_w = 1 if double else 2
             for o in offsets:
