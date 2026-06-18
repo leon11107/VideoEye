@@ -193,17 +193,18 @@ def build_stylesheet(t: Theme) -> str:
             image: url("{_CHECK_SVG}");
         }}
         QCheckBox::indicator:disabled {{ border-color: {t.hx(t.disabled_text)}; }}
-        QToolButton#overlayBtn {{
-            padding: 3px 8px; border: 1px solid {t.hx(t.border)};
-            border-radius: 3px; background-color: {t.hx(t.button)};
-            color: {t.hx(t.text)}; }}
-        QToolButton#overlayBtn:hover {{ border-color: {t.hx(t.highlight)}; }}
-        QToolButton#overlayBtn:checked {{
-            background-color: {t.hx(t.highlight)};
-            color: {t.hx(t.highlight_text)};
-            border-color: {t.hx(t.highlight)}; }}
-        QToolButton#overlayBtn::menu-button {{
-            width: 14px; border-left: 1px solid {t.hx(t.border)}; }}
+        QToolButton#overlayChip {{
+            border: none; background: transparent; color: {t.hx(t.text)};
+            padding: 5px 10px 5px 13px; border-radius: 12px; font-size: 13px; }}
+        QToolButton#overlayChip:hover {{ background: {t.hx(t.button)}; }}
+        QToolButton#overlayChip:checked {{
+            background: {t.hx(t.highlight)}; color: {t.hx(t.highlight_text)}; }}
+        QToolButton#overlayChip::menu-button {{
+            border: none; background: transparent; width: 16px; }}
+        QMenu#overlayMenu {{
+            background-color: {t.hx(t.base)}; border: none; padding: 5px 0; }}
+        QMenu#overlayMenu::item {{ padding: 5px 18px 5px 8px; }}
+        QMenu#overlayMenu::item:selected {{ background-color: {t.hx(t.menu_sel)}; }}
     """
 
 

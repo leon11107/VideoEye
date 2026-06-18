@@ -103,17 +103,19 @@ class OverlayToolBar(QWidget):
 
     def _add_button(self, layout, master_key: str, label: str, subs) -> None:
         btn = QToolButton()
-        btn.setObjectName("overlayBtn")  # themed checked/hover state
+        btn.setObjectName("overlayChip")  # themed flat pill (checked = filled)
         btn.setText(label)
         btn.setCheckable(True)
         btn.setChecked(master_key in DEFAULT_ON)  # before connect: no startup emit
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.toggled.connect(self._on_toggled)
         self._sources[master_key] = btn
 
         if subs:
             btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
             menu = QMenu(btn)
+            menu.setObjectName("overlayMenu")  # borderless check-mark dropdown
             exclusive = master_key in _EXCLUSIVE_GROUPS
             acts = []
             for key, sub_label in subs:
