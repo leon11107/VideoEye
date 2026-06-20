@@ -32,6 +32,27 @@ verify() {  # verify <out> <regex> <label>
   fi
 }
 
+# Ground-truth per-block inspector from a CONFIG_INSPECTION libaom build. Used
+# to measure actual palette usage (a header flag only says it is *allowed*).
+INSP="${VEYE_AOM_INSPECT:-/c/Users/llw/Desktop/aom/aom_build_insp/inspect.exe}"
+
+verify_palette() {  # verify_palette <out> -- report keyframe palette coverage %
+  local out="$1"
+  [ -x "$INSP" ] || { printf "  SKIP  palette coverage (no inspect.exe)\n"; return; }
+  # Repo-relative temps: ffmpeg/inspect/py are all native and resolve them
+  # against the same CWD (a bash '>' redirect to /tmp would land in MSYS /tmp,
+  # which Windows python cannot read).
+  ffmpeg -hide_banner -loglevel error -y -i "$out" -c copy -f ivf ._plt.ivf
+  "$INSP" ._plt.ivf -plt --limit=1 > ._plt.json 2>/dev/null
+  py -3.14 - <<'PY'
+import json
+d=json.load(open("._plt.json")); g=d[0]["palette"]; c=[v for r in g for v in r]
+nz=sum(1 for v in c if v>0)
+print(f"  INFO  keyframe palette coverage: {nz}/{len(c)} = {100*nz/max(1,len(c)):.1f}%")
+PY
+  rm -f ._plt.ivf ._plt.json
+}
+
 echo "### 1. 128x128 superblock"
 enc "$OUT/av1_sb128.mp4" "sb-size=128:tile-columns=0:tile-rows=0"
 verify "$OUT/av1_sb128.mp4" "use_128x128_superblock +1 += 1" "use_128x128_superblock"
@@ -49,6 +70,21 @@ ffmpeg -hide_banner -loglevel error -y \
   -aom-params "tune-content=screen:enable-palette=1:enable-intrabc=1" \
   "$OUT/av1_palette_screen.mp4"
 verify "$OUT/av1_palette_screen.mp4" "allow_screen_content_tools +1 += 1" "allow_screen_content_tools"
+verify_palette "$OUT/av1_palette_screen.mp4"
+
+echo "### 3b. STRONG palette: few-color mosaic (near-lossless, single GOP)"
+# A deterministic discrete-color mosaic: every block holds only 3-5 distinct
+# colors with hard edges, so palette is the cheapest coding mode almost
+# everywhere (~99.9% of keyframe MI cells vs ~0.1% for the natural clip above).
+# Single GOP (-g 1000) so order_hints stay unique -> clean frame mapping.
+# cpu-used 4 (palette RD is skipped at the fastest presets).
+MVF="geq=lum='(mod(floor((X+N*4)/12)+floor(Y/12)\,8))*26+20':cb='(mod(floor(X/24)\,4))*55+40':cr='(mod(floor(Y/24)\,4))*55+40',format=yuv420p"
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=black:s=1280x720:r=25" \
+  -frames:v "$N" -vf "$MVF" -c:v libaom-av1 -cpu-used 4 -g 1000 -crf 12 -b:v 0 \
+  -aom-params "tune-content=screen:enable-palette=1:enable-intrabc=1" \
+  "$OUT/av1_palette_strong.mp4"
+verify "$OUT/av1_palette_strong.mp4" "allow_screen_content_tools +1 += 1" "allow_screen_content_tools"
+verify_palette "$OUT/av1_palette_strong.mp4"
 
 echo "### 4. superres (coded smaller, upscaled on output) -- via SVT-AV1"
 # libaom in this build exposes no superres option, so use SVT-AV1, which signals
