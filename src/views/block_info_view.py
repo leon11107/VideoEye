@@ -344,9 +344,14 @@ class BlockHoverPanel(QWidget):
         title = "Macroblock" if codec in ("h264", "avc") else "Coded Unit"
         cu = self._section(title)
         if block is not None:
+            palette = info.get("av1_palette")
             if aux is not None:
                 self._row(cu, "type",
                           h264_mb_type_label(aux[0], int(block["pred"]), iw))
+            elif codec == "av1" and palette:
+                # AV1 palette blocks keep y_mode = DC; surface the palette like
+                # Elecard's "pr intra type luma: PALETTE" instead of the y_mode.
+                self._row(cu, "type", f"Palette ({palette} colors)")
             else:
                 self._row(cu, "type", block_type_label(codec, int(block["mode"])))
             self._row(cu, "dimensions", f"{int(block['w'])}x{int(block['h'])}")

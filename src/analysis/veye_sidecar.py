@@ -59,7 +59,7 @@ _REC_AV1 = np.dtype([
     ("bsize", "u1"), ("pred", "u1"), ("mode", "u1"), ("skip", "u1"),
     ("qp", "<i4"),
     ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
-    ("ref0", "i1"), ("ref1", "i1"), ("tx_size", "u1"), ("reserved", "u1"),
+    ("ref0", "i1"), ("ref1", "i1"), ("tx_size", "u1"), ("palette", "u1"),
 ])
 
 # HEVC motion vectors are stored in quarter-pel luma units.
@@ -156,6 +156,7 @@ class VeyeFrameBlocks:
     mode: Optional[np.ndarray] = None       # AV1: PREDICTION_MODE per cell
     skip: Optional[np.ndarray] = None       # AV1: skip_txfm flag per cell
     tx_size: Optional[np.ndarray] = None    # AV1: TX_SIZE per cell
+    palette: Optional[np.ndarray] = None    # AV1: luma palette size (0=none, 2..8)
     # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
     # each (grid_h, grid_w) int32.
     mb_total_bits: Optional[np.ndarray] = None
@@ -414,6 +415,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             mode=recs["mode"].reshape(grid_h, grid_w).copy(),
             skip=recs["skip"].reshape(grid_h, grid_w).copy(),
             tx_size=recs["tx_size"].reshape(grid_h, grid_w).copy(),
+            palette=recs["palette"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
         )

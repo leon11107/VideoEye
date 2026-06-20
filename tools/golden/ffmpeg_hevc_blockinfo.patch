@@ -738,7 +738,7 @@ index 2d817c7..667f9ba 100644
 +            rec->ref0    = (int8_t)mi->ref_frame[0];
 +            rec->ref1    = (int8_t)mi->ref_frame[1];
 +            rec->tx_size = (uint8_t)mi->tx_size;
-+            rec->reserved = 0;
++            rec->palette = (uint8_t)(mi->palette > 0 ? mi->palette : 0);
 +            /* Note which reference slots (LAST_FRAME=1..ALTREF_FRAME=7) are
 +             * actually referenced, so we export only used references. */
 +            for (i = 0; i < 2; i++) {
@@ -835,7 +835,7 @@ index eadfb7b..24f18be 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 11
++#define VEYE_BI_VERSION 12
 +
 +/* H.264 per-MB scratch stride (int32 per MB) in the decoder's veye_mb_bits
 + * table: [0]=total [1]=prediction [2]=transform bits, [3]=intra type
@@ -873,7 +873,7 @@ index eadfb7b..24f18be 100644
 +    int8_t   ref0;        ///< ref_frame[0] (0=INTRA, 1..7 inter, -1 none)
 +    int8_t   ref1;        ///< ref_frame[1] (-1 if single-reference)
 +    uint8_t  tx_size;     ///< libaom TX_SIZE
-+    uint8_t  reserved;
++    uint8_t  palette;     ///< luma palette size (0 = none, 2..8 colors)
 +} VeyeBlockRecordAV1;
 +
 +struct veye_insp_frame_data;

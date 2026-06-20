@@ -149,6 +149,10 @@ class FrameAnalysis:
     h264_mode4: Optional[np.ndarray] = None
     h264_blocksize: Optional[np.ndarray] = None
 
+    # AV1 luma palette size per MI cell (0 = none, 2..8 colors), at qp_unit
+    # granularity. None for other codecs / when not requested.
+    av1_palette: Optional[np.ndarray] = None
+
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
     extensions: dict = field(default_factory=dict)
@@ -171,6 +175,17 @@ class FrameAnalysis:
             return None
         qp = int(self.qp_grid[row, col])
         return qp if qp >= 0 else None
+
+    def palette_at(self, px: int, py: int) -> Optional[int]:
+        """AV1 luma palette size (0 = none, 2..8 colors) covering pixel
+        (px, py), or None if no palette data. Indexed at qp_unit granularity
+        (the AV1 MI grid, same as the QP grid)."""
+        if self.av1_palette is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if row >= self.av1_palette.shape[0] or col >= self.av1_palette.shape[1]:
+            return None
+        return int(self.av1_palette[row, col])
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

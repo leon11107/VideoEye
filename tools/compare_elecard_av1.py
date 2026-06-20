@@ -154,8 +154,16 @@ def our_frame_stats(fb):
     blk = blocks_from_frame(fb)
     sz = Counter(f"{int(b['w'])}x{int(b['h'])}" for b in blk)
     intra = intra_modes_from_frame(fb)
+    unit = fb.block_unit
     md = Counter()
     for r in intra:
+        # Match Elecard's "pr intra type luma": a palette block keeps y_mode=DC,
+        # so fold the palette flag in (palette grid is at MI granularity).
+        pv = (int(fb.palette[int(r["y"]) // unit, int(r["x"]) // unit])
+              if fb.palette is not None else 0)
+        if pv > 0:
+            md["PALETTE"] += 1
+            continue
         m = int(r["mode"])
         md[_AV1_PRED_MODES[m] if 0 <= m < len(_AV1_PRED_MODES) else f"m{m}"] += 1
     tx = tu_luma_from_frame(fb)

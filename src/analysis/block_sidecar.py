@@ -111,7 +111,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v14"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v15"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -321,6 +321,12 @@ class BlockSidecar:
         """QP grid (int16, -1 = unknown) for a frame, or None if not ready."""
         fb = self._frame(frame_index)
         return qp_grid_from_frame(fb) if fb is not None else None
+
+    def palette_grid_for(self, frame_index: int) -> Optional[np.ndarray]:
+        """AV1 luma palette-size grid (0 = none, 2..8 colors) at MI granularity,
+        or None (non-AV1 / not ready)."""
+        fb = self._frame(frame_index)
+        return fb.palette if fb is not None else None
 
     def intra_modes_for(self, frame_index: int) -> Optional[np.ndarray]:
         """Intra-prediction records (INTRA_DTYPE) for a frame, or None."""
