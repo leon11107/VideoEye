@@ -3,7 +3,7 @@
 from .schema import FrameAnalysis, PredType, MV_DTYPE, BLOCK_DTYPE
 from .extractor import CodecExtractor, create_extractor, register
 from .labels import (
-    block_type_label, qp_field_name,
+    block_type_label, qp_field_name, av1_filter_intra_name,
     h264_intra_mode_name, h264_mb_type_label,
 )
 
@@ -15,6 +15,6 @@ from . import av1  # noqa: F401
 __all__ = [
     "FrameAnalysis", "PredType", "MV_DTYPE", "BLOCK_DTYPE",
     "CodecExtractor", "create_extractor", "register",
-    "block_type_label", "qp_field_name",
+    "block_type_label", "qp_field_name", "av1_filter_intra_name",
     "h264_intra_mode_name", "h264_mb_type_label",
 ]

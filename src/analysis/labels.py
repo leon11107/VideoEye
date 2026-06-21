@@ -23,6 +23,20 @@ _H264_SHAPES = {
 }
 
 
+# libaom FILTER_INTRA_MODE enum (av1/common/enums.h). Filter-intra keeps the
+# block's y_mode = DC_PRED, so this is signalled separately (use_filter_intra +
+# filter_intra_mode); the sidecar stores the mode 0..4, or -1 if not used.
+_AV1_FILTER_INTRA = ("FILTER_DC", "FILTER_V", "FILTER_H",
+                     "FILTER_D157", "FILTER_PAETH")
+
+
+def av1_filter_intra_name(mode: int) -> str:
+    """Name for an AV1 filter-intra mode (0..4)."""
+    if 0 <= mode < len(_AV1_FILTER_INTRA):
+        return _AV1_FILTER_INTRA[mode]
+    return f"filter-intra {mode}"
+
+
 def block_type_label(codec: str, mode: int) -> str:
     """Name for a coding block's BLOCK_DTYPE['mode'] value, per codec."""
     if codec == "av1":

@@ -340,11 +340,14 @@ class Decoder:
                     unit = self._block_sidecar.block_unit_for(sc_index)
                     if unit:
                         analysis.qp_unit = unit
-                    # AV1 luma palette size shares the QP grid's MI granularity,
-                    # so fetch it here where qp_unit is known.
+                    # AV1 luma palette size and filter-intra mode share the QP
+                    # grid's MI granularity, so fetch them here where qp_unit is
+                    # known.
                     if analysis.codec == "av1":
                         analysis.av1_palette = \
                             self._block_sidecar.palette_grid_for(sc_index)
+                        analysis.av1_filter_intra = \
+                            self._block_sidecar.filter_intra_grid_for(sc_index)
         return analysis
 
     def refs_for(self, frame_index: int):

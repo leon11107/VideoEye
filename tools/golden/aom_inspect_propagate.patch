@@ -72,7 +72,7 @@ index 77769bd1d5..4449c88dd9 100644
    CTRL_MAP_END,
  };
 diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
-index f84ed17d20..7e48e9c985 100644
+index f84ed17d20..54e8c74553 100644
 --- a/av1/decoder/inspection.c
 +++ b/av1/decoder/inspection.c
 @@ -64,6 +64,16 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
@@ -92,11 +92,33 @@ index f84ed17d20..7e48e9c985 100644
  #if CONFIG_ACCOUNTING
    fd->accounting = &pbi->accounting;
  #endif
+@@ -96,6 +106,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+       mi->intrabc = (int16_t)mbmi->use_intrabc;
+       mi->palette = (int16_t)mbmi->palette_mode_info.palette_size[0];
+       mi->uv_palette = (int16_t)mbmi->palette_mode_info.palette_size[1];
++      // VideoEye: filter-intra mode (0..4), or -1 if not used. The block's
++      // y_mode stays DC_PRED when filter-intra is on, so this is the only field
++      // that distinguishes a filter-intra block.
++      mi->filter_intra =
++          mbmi->filter_intra_mode_info.use_filter_intra
++              ? (int16_t)mbmi->filter_intra_mode_info.filter_intra_mode
++              : -1;
+       // Prediction Mode for Chromatic planes
+       if (mi->mode < INTRA_MODES) {
+         mi->uv_mode = mbmi->uv_mode;
 diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
-index 7d1c14db2a..75fa4dca64 100644
+index 7d1c14db2a..841fdc5b8d 100644
 --- a/av1/decoder/inspection.h
 +++ b/av1/decoder/inspection.h
-@@ -79,6 +79,13 @@ struct insp_frame_data {
+@@ -55,6 +55,7 @@ struct insp_mi_data {
+   int16_t intrabc;
+   int16_t palette;
+   int16_t uv_palette;
++  int16_t filter_intra;  // VideoEye: filter-intra mode 0..4, -1 if not used
+ };
+ 
+ typedef struct insp_frame_data insp_frame_data;
+@@ -79,6 +80,13 @@ struct insp_frame_data {
    int delta_q_present_flag;
    int delta_q_res;
    int show_existing_frame;

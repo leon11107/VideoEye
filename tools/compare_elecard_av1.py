@@ -155,17 +155,21 @@ def our_frame_stats(fb):
     sz = Counter(f"{int(b['w'])}x{int(b['h'])}" for b in blk)
     intra = intra_modes_from_frame(fb)
     unit = fb.block_unit
+    _FI = ("FILTER_DC", "FILTER_V", "FILTER_H", "FILTER_D157", "FILTER_PAETH")
     md = Counter()
     for r in intra:
-        # Match Elecard's "pr intra type luma": a palette block keeps y_mode=DC,
-        # so fold the palette flag in (palette grid is at MI granularity).
-        pv = (int(fb.palette[int(r["y"]) // unit, int(r["x"]) // unit])
-              if fb.palette is not None else 0)
+        # Match Elecard's "pr intra type luma": palette and filter-intra blocks
+        # both keep y_mode=DC, so fold those flags in (MI-granular grids).
+        row, col = int(r["y"]) // unit, int(r["x"]) // unit
+        pv = int(fb.palette[row, col]) if fb.palette is not None else 0
+        fi = int(fb.filter_intra[row, col]) if fb.filter_intra is not None else -1
         if pv > 0:
             md["PALETTE"] += 1
-            continue
-        m = int(r["mode"])
-        md[_AV1_PRED_MODES[m] if 0 <= m < len(_AV1_PRED_MODES) else f"m{m}"] += 1
+        elif fi >= 0:
+            md[_FI[fi] if 0 <= fi < 5 else f"FI{fi}"] += 1
+        else:
+            m = int(r["mode"])
+            md[_AV1_PRED_MODES[m] if 0 <= m < len(_AV1_PRED_MODES) else f"m{m}"] += 1
     tx = tu_luma_from_frame(fb)
     txc = Counter(f"{int(t['w'])}x{int(t['h'])}" for t in tx)
     qp = qp_grid_from_frame(fb).astype(np.int32)

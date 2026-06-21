@@ -152,6 +152,9 @@ class FrameAnalysis:
     # AV1 luma palette size per MI cell (0 = none, 2..8 colors), at qp_unit
     # granularity. None for other codecs / when not requested.
     av1_palette: Optional[np.ndarray] = None
+    # AV1 filter-intra mode per MI cell (0..4, -1 = not used), at qp_unit
+    # granularity. None for other codecs / when not requested.
+    av1_filter_intra: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -186,6 +189,19 @@ class FrameAnalysis:
         if row >= self.av1_palette.shape[0] or col >= self.av1_palette.shape[1]:
             return None
         return int(self.av1_palette[row, col])
+
+    def filter_intra_at(self, px: int, py: int) -> Optional[int]:
+        """AV1 filter-intra mode (0..4) covering pixel (px, py), or None if no
+        filter-intra data or the block does not use it (-1). Indexed at qp_unit
+        granularity (the AV1 MI grid)."""
+        if self.av1_filter_intra is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if (row >= self.av1_filter_intra.shape[0]
+                or col >= self.av1_filter_intra.shape[1]):
+            return None
+        fi = int(self.av1_filter_intra[row, col])
+        return fi if fi >= 0 else None
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

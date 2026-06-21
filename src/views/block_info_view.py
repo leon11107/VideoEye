@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..analysis import (
-    PredType, block_type_label, qp_field_name,
+    PredType, block_type_label, qp_field_name, av1_filter_intra_name,
     h264_intra_mode_name, h264_mb_type_label,
 )
 from .overlay import OVERLAYS, DEFAULT_ON, OVERLAY_GROUPS
@@ -345,6 +345,7 @@ class BlockHoverPanel(QWidget):
         cu = self._section(title)
         if block is not None:
             palette = info.get("av1_palette")
+            fi = info.get("av1_filter_intra")
             if aux is not None:
                 self._row(cu, "type",
                           h264_mb_type_label(aux[0], int(block["pred"]), iw))
@@ -352,6 +353,10 @@ class BlockHoverPanel(QWidget):
                 # AV1 palette blocks keep y_mode = DC; surface the palette like
                 # Elecard's "pr intra type luma: PALETTE" instead of the y_mode.
                 self._row(cu, "type", f"Palette ({palette} colors)")
+            elif codec == "av1" and fi is not None:
+                # Filter-intra blocks also keep y_mode = DC; show the filter-intra
+                # mode like Elecard's "pr intra type luma: FILTER_*".
+                self._row(cu, "type", av1_filter_intra_name(fi))
             else:
                 self._row(cu, "type", block_type_label(codec, int(block["mode"])))
             self._row(cu, "dimensions", f"{int(block['w'])}x{int(block['h'])}")
