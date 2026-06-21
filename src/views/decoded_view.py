@@ -341,6 +341,7 @@ class DecodedView(QWidget):
             "h264_intra": a.h264_intra_at(px, py),   # (mode, block_size) | None
             "av1_palette": a.palette_at(px, py),      # AV1 luma palette size | None
             "av1_filter_intra": a.filter_intra_at(px, py),  # AV1 FI mode | None
+            "av1_segment_id": a.segment_id_at(px, py),     # AV1 segment id | None
         }
 
     def _show_block_at(self, px: int, py: int, locked: bool = False) -> None:

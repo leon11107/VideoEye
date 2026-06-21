@@ -155,6 +155,9 @@ class FrameAnalysis:
     # AV1 filter-intra mode per MI cell (0..4, -1 = not used), at qp_unit
     # granularity. None for other codecs / when not requested.
     av1_filter_intra: Optional[np.ndarray] = None
+    # AV1 segment id per MI cell (0..7), at qp_unit granularity. None for other
+    # codecs / when not requested.
+    av1_segment_id: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -202,6 +205,17 @@ class FrameAnalysis:
             return None
         fi = int(self.av1_filter_intra[row, col])
         return fi if fi >= 0 else None
+
+    def segment_id_at(self, px: int, py: int) -> Optional[int]:
+        """AV1 segment id (0..7) covering pixel (px, py), or None if no
+        segmentation data. Indexed at qp_unit granularity (the AV1 MI grid)."""
+        if self.av1_segment_id is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if (row >= self.av1_segment_id.shape[0]
+                or col >= self.av1_segment_id.shape[1]):
+            return None
+        return int(self.av1_segment_id[row, col])
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

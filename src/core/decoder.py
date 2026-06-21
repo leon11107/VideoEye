@@ -348,6 +348,8 @@ class Decoder:
                             self._block_sidecar.palette_grid_for(sc_index)
                         analysis.av1_filter_intra = \
                             self._block_sidecar.filter_intra_grid_for(sc_index)
+                        analysis.av1_segment_id = \
+                            self._block_sidecar.segment_id_grid_for(sc_index)
         return analysis
 
     def refs_for(self, frame_index: int):

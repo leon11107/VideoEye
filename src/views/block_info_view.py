@@ -364,6 +364,9 @@ class BlockHoverPanel(QWidget):
                       PredType.NAMES.get(int(block["pred"]), "?"))
             if codec == "hevc":
                 self._row(cu, "depth", str(int(block["depth"])))
+            seg = info.get("av1_segment_id")
+            if codec == "av1" and seg is not None:
+                self._row(cu, "segment id", str(seg))
             if aux is not None:
                 if h264_intra is not None and h264_intra[0] is not None:
                     it = 2 if iw == 16 else 1     # exact sub-block mode + size

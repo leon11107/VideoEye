@@ -72,10 +72,18 @@ index 77769bd1d5..4449c88dd9 100644
    CTRL_MAP_END,
  };
 diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
-index f84ed17d20..54e8c74553 100644
+index f84ed17d20..26a9523849 100644
 --- a/av1/decoder/inspection.c
 +++ b/av1/decoder/inspection.c
-@@ -64,6 +64,16 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -16,6 +16,7 @@
+ #include "av1/decoder/inspection.h"
+ #include "av1/common/enums.h"
+ #include "av1/common/cdef.h"
++#include "av1/common/quant_common.h"  // VideoEye: av1_get_qindex (segment QP)
+ 
+ static void ifd_init_mi_rc(insp_frame_data *fd, int mi_cols, int mi_rows) {
+   fd->mi_cols = mi_cols;
+@@ -64,6 +65,16 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
    fd->tile_mi_rows = tile_info.mi_row_end - tile_info.mi_row_start;
    fd->delta_q_present_flag = cm->delta_q_info.delta_q_present_flag;
    fd->delta_q_res = cm->delta_q_info.delta_q_res;
@@ -92,7 +100,7 @@ index f84ed17d20..54e8c74553 100644
  #if CONFIG_ACCOUNTING
    fd->accounting = &pbi->accounting;
  #endif
-@@ -96,6 +106,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -96,6 +107,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
        mi->intrabc = (int16_t)mbmi->use_intrabc;
        mi->palette = (int16_t)mbmi->palette_mode_info.palette_size[0];
        mi->uv_palette = (int16_t)mbmi->palette_mode_info.palette_size[1];
@@ -106,6 +114,20 @@ index f84ed17d20..54e8c74553 100644
        // Prediction Mode for Chromatic planes
        if (mi->mode < INTRA_MODES) {
          mi->uv_mode = mbmi->uv_mode;
+@@ -154,8 +172,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+         mi->cfl_alpha_idx = 0;
+         mi->cfl_alpha_sign = 0;
+       }
+-      // delta_q
+-      mi->current_qindex = mbmi->current_qindex;
++      // delta_q + segmentation: mbmi->current_qindex carries only the delta_q
++      // adjustment; fold in the per-segment SEG_LVL_ALT_Q delta so this is the
++      // effective qindex actually used to dequant the block (matches Elecard).
++      mi->current_qindex =
++          av1_get_qindex(&cm->seg, mbmi->segment_id, mbmi->current_qindex);
+     }
+   }
+   return 1;
 diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
 index 7d1c14db2a..841fdc5b8d 100644
 --- a/av1/decoder/inspection.h
