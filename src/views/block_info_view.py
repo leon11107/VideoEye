@@ -367,21 +367,6 @@ class BlockHoverPanel(QWidget):
             seg = info.get("av1_segment_id")
             if codec == "av1" and seg is not None:
                 self._row(cu, "segment id", str(seg))
-            cdef = info.get("av1_cdef")
-            if codec == "av1" and cdef is not None:
-                # (primary, secondary) luma CDEF strength; 0/0 = no filtering.
-                self._row(cu, "cdef", "off" if cdef == (0, 0)
-                          else f"{cdef[0]}/{cdef[1]} (pri/sec)")
-            lr = info.get("av1_lr")
-            if codec == "av1" and lr and len(lr) == 3:
-                # Frame-level loop restoration type per plane (same for every
-                # block of the frame). All-None -> "off".
-                if any(lr):
-                    self._row(cu, "loop restoration",
-                              "Y=%s U=%s V=%s" % tuple(av1_restoration_name(t)
-                                                       for t in lr))
-                else:
-                    self._row(cu, "loop restoration", "off")
             if aux is not None:
                 if h264_intra is not None and h264_intra[0] is not None:
                     it = 2 if iw == 16 else 1     # exact sub-block mode + size
@@ -406,6 +391,21 @@ class BlockHoverPanel(QWidget):
         tu = self._section("Transform Unit")
         self._row(tu, qp_field_name(codec),
                   str(qp) if qp is not None else "n/a")
+
+        # AV1 in-loop filters, laid out like Elecard's block presenter: CDEF and
+        # loop restoration each get their own section. (Chroma CDEF strengths and
+        # the per-RU restoration coefficients are a later phase.)
+        if codec == "av1":
+            cdef = info.get("av1_cdef")
+            if cdef is not None:
+                cd = self._section("CDEF")
+                self._row(cd, "y_pri_strength", str(cdef[0]))
+                self._row(cd, "y_sec_strength", str(cdef[1]))
+            lr = info.get("av1_lr")
+            if lr and len(lr) == 3:
+                lrs = self._section("Loop Restoration")
+                for p in range(3):
+                    self._row(lrs, f"lr_type[{p}]", av1_restoration_name(lr[p]))
 
         pu = self._section("Prediction Unit")
         if mvs is not None and len(mvs) > 0:
