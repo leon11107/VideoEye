@@ -162,6 +162,8 @@ class FrameAnalysis:
     # qp_unit granularity. None for other codecs / when not requested.
     av1_cdef_level: Optional[np.ndarray] = None
     av1_cdef_strength: Optional[np.ndarray] = None
+    av1_cdef_uv_level: Optional[np.ndarray] = None
+    av1_cdef_uv_strength: Optional[np.ndarray] = None
     # AV1 per-plane (Y, U, V) loop-restoration frame type (0..3) and unit size
     # (px). Frame-level (same for every block of the frame).
     av1_lr_type: tuple = ()
@@ -226,16 +228,21 @@ class FrameAnalysis:
         return int(self.av1_segment_id[row, col])
 
     def cdef_at(self, px: int, py: int):
-        """AV1 CDEF (luma primary, secondary) strength covering pixel (px, py),
-        or None if no CDEF data. (0, 0) means CDEF applies no filtering here.
-        Indexed at qp_unit granularity (the AV1 MI grid)."""
+        """AV1 CDEF strengths covering pixel (px, py) as
+        (y_pri, y_sec, uv_pri, uv_sec), or None if no CDEF data. All-zero means
+        CDEF applies no filtering here. Indexed at qp_unit granularity."""
         if self.av1_cdef_level is None or px < 0 or py < 0:
             return None
         row, col = py // self.qp_unit, px // self.qp_unit
         if (row >= self.av1_cdef_level.shape[0]
                 or col >= self.av1_cdef_level.shape[1]):
             return None
-        return int(self.av1_cdef_level[row, col]), int(self.av1_cdef_strength[row, col])
+        uvl = (int(self.av1_cdef_uv_level[row, col])
+               if self.av1_cdef_uv_level is not None else 0)
+        uvs = (int(self.av1_cdef_uv_strength[row, col])
+               if self.av1_cdef_uv_strength is not None else 0)
+        return (int(self.av1_cdef_level[row, col]),
+                int(self.av1_cdef_strength[row, col]), uvl, uvs)
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

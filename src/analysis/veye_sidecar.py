@@ -56,11 +56,12 @@ _REC_HEVC = np.dtype([
     ("ref0", "i1"), ("ref1", "i1"), ("part_mode", "u1"), ("ct_depth", "u1"),
 ])
 
-# VeyeBlockRecordAV1 (sidecar v2): u8 bsize, pred, mode, skip, i32 qp,
-# i16 mv0_x/y, i16 mv1_x/y, i8 ref0/ref1, u8 tx_size, u8 reserved (20 bytes).
-# The C struct has 4-byte alignment (int32 qp), so its sizeof is padded up to a
-# multiple of 4: 21 used bytes -> 24. The trailing "_pad" keeps the numpy stride
-# byte-identical to sizeof(VeyeBlockRecordAV1) = 24.
+# VeyeBlockRecordAV1: u8 bsize, pred, mode, skip, i32 qp, i16 mv0_x/y,
+# i16 mv1_x/y, i8 ref0/ref1, u8 tx_size, palette, i8 filter_intra, u8 segment_id,
+# cdef_level, cdef_strength, cdef_uv_level, cdef_uv_strength (26 used bytes).
+# The C struct has 4-byte alignment (int32 qp), so sizeof is padded to a multiple
+# of 4: 26 -> 28. The trailing "_pad" keeps the numpy stride byte-identical to
+# sizeof(VeyeBlockRecordAV1) = 28.
 _REC_AV1 = np.dtype([
     ("bsize", "u1"), ("pred", "u1"), ("mode", "u1"), ("skip", "u1"),
     ("qp", "<i4"),
@@ -68,6 +69,7 @@ _REC_AV1 = np.dtype([
     ("ref0", "i1"), ("ref1", "i1"), ("tx_size", "u1"), ("palette", "u1"),
     ("filter_intra", "i1"), ("segment_id", "u1"),
     ("cdef_level", "u1"), ("cdef_strength", "u1"),
+    ("cdef_uv_level", "u1"), ("cdef_uv_strength", "u1"), ("_pad", "V2"),
 ])
 
 # HEVC motion vectors are stored in quarter-pel luma units.
@@ -169,6 +171,8 @@ class VeyeFrameBlocks:
     segment_id: Optional[np.ndarray] = None  # AV1: segment id 0..7 (segmentation)
     cdef_level: Optional[np.ndarray] = None  # AV1: CDEF luma primary strength
     cdef_strength: Optional[np.ndarray] = None  # AV1: CDEF luma secondary strength
+    cdef_uv_level: Optional[np.ndarray] = None  # AV1: CDEF chroma primary strength
+    cdef_uv_strength: Optional[np.ndarray] = None  # AV1: CDEF chroma secondary
     lr_type: tuple = ()                     # AV1: per-plane loop-restoration type
     lr_unit_size: tuple = ()                # AV1: per-plane restoration unit px
     # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
@@ -442,6 +446,8 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             segment_id=recs["segment_id"].reshape(grid_h, grid_w).copy(),
             cdef_level=recs["cdef_level"].reshape(grid_h, grid_w).copy(),
             cdef_strength=recs["cdef_strength"].reshape(grid_h, grid_w).copy(),
+            cdef_uv_level=recs["cdef_uv_level"].reshape(grid_h, grid_w).copy(),
+            cdef_uv_strength=recs["cdef_uv_strength"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
             lr_type=lr_type, lr_unit_size=lr_unit_size,

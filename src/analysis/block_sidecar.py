@@ -111,7 +111,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v19"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v20"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -341,11 +341,12 @@ class BlockSidecar:
         return fb.segment_id if fb is not None else None
 
     def cdef_grids_for(self, frame_index: int):
-        """AV1 CDEF (level, strength) grids at MI granularity, or (None, None)."""
+        """AV1 CDEF (y_level, y_strength, uv_level, uv_strength) grids at MI
+        granularity, or all None."""
         fb = self._frame(frame_index)
         if fb is None:
-            return None, None
-        return fb.cdef_level, fb.cdef_strength
+            return None, None, None, None
+        return fb.cdef_level, fb.cdef_strength, fb.cdef_uv_level, fb.cdef_uv_strength
 
     def lr_for(self, frame_index: int):
         """AV1 frame-level loop-restoration (lr_type, lr_unit_size) per-plane

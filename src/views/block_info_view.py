@@ -401,6 +401,9 @@ class BlockHoverPanel(QWidget):
                 cd = self._section("CDEF")
                 self._row(cd, "y_pri_strength", str(cdef[0]))
                 self._row(cd, "y_sec_strength", str(cdef[1]))
+                if len(cdef) >= 4:
+                    self._row(cd, "uv_pri_strength", str(cdef[2]))
+                    self._row(cd, "uv_sec_strength", str(cdef[3]))
             lr = info.get("av1_lr")
             if lr and len(lr) == 3:
                 lrs = self._section("Loop Restoration")

@@ -72,7 +72,7 @@ index 77769bd1d5..4449c88dd9 100644
    CTRL_MAP_END,
  };
 diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
-index f84ed17d20..2909cd6669 100644
+index f84ed17d20..3dbb6ba036 100644
 --- a/av1/decoder/inspection.c
 +++ b/av1/decoder/inspection.c
 @@ -16,6 +16,7 @@
@@ -120,7 +120,21 @@ index f84ed17d20..2909cd6669 100644
        // Prediction Mode for Chromatic planes
        if (mi->mode < INTRA_MODES) {
          mi->uv_mode = mbmi->uv_mode;
-@@ -154,8 +178,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -147,6 +171,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+                           CDEF_SEC_STRENGTHS;
+ 
+       mi->cdef_strength += mi->cdef_strength == 3;
++      // VideoEye: chroma CDEF strengths (same packing as luma).
++      mi->cdef_uv_level = cm->cdef_info.cdef_uv_strengths[mbmi->cdef_strength] /
++                          CDEF_SEC_STRENGTHS;
++      mi->cdef_uv_strength =
++          cm->cdef_info.cdef_uv_strengths[mbmi->cdef_strength] %
++          CDEF_SEC_STRENGTHS;
++      mi->cdef_uv_strength += mi->cdef_uv_strength == 3;
+       if (mbmi->uv_mode == UV_CFL_PRED) {
+         mi->cfl_alpha_idx = mbmi->cfl_alpha_idx;
+         mi->cfl_alpha_sign = mbmi->cfl_alpha_signs;
+@@ -154,8 +185,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
          mi->cfl_alpha_idx = 0;
          mi->cfl_alpha_sign = 0;
        }
@@ -135,18 +149,20 @@ index f84ed17d20..2909cd6669 100644
    }
    return 1;
 diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
-index 7d1c14db2a..a124255881 100644
+index 7d1c14db2a..bfbd2f6a0b 100644
 --- a/av1/decoder/inspection.h
 +++ b/av1/decoder/inspection.h
-@@ -55,6 +55,7 @@ struct insp_mi_data {
+@@ -55,6 +55,9 @@ struct insp_mi_data {
    int16_t intrabc;
    int16_t palette;
    int16_t uv_palette;
 +  int16_t filter_intra;  // VideoEye: filter-intra mode 0..4, -1 if not used
++  int16_t cdef_uv_level;  // VideoEye: chroma CDEF primary strength
++  int16_t cdef_uv_strength;  // VideoEye: chroma CDEF secondary strength
  };
  
  typedef struct insp_frame_data insp_frame_data;
-@@ -79,6 +80,17 @@ struct insp_frame_data {
+@@ -79,6 +82,17 @@ struct insp_frame_data {
    int delta_q_present_flag;
    int delta_q_res;
    int show_existing_frame;
