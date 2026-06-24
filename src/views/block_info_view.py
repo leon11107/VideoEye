@@ -406,9 +406,14 @@ class BlockHoverPanel(QWidget):
                     self._row(cd, "uv_sec_strength", str(cdef[3]))
             lr = info.get("av1_lr")
             coeffs = info.get("av1_lr_coeffs")
-            if lr and len(lr) == 3:
+            # Only show the section / a plane's row when that plane actually uses
+            # restoration (skip RESTORE_NONE planes; hide the section entirely
+            # when no plane is restored).
+            if lr and len(lr) == 3 and any(lr):
                 lrs = self._section("Loop Restoration")
                 for p in range(3):
+                    if not lr[p]:
+                        continue
                     item = QTreeWidgetItem(
                         lrs, [f"lr_type[{p}]", av1_restoration_name(lr[p])])
                     c = coeffs[p] if coeffs and p < len(coeffs) else None
