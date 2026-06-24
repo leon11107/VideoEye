@@ -367,6 +367,11 @@ class BlockHoverPanel(QWidget):
             seg = info.get("av1_segment_id")
             if codec == "av1" and seg is not None:
                 self._row(cu, "segment id", str(seg))
+            cdef = info.get("av1_cdef")
+            if codec == "av1" and cdef is not None:
+                # (primary, secondary) luma CDEF strength; 0/0 = no filtering.
+                self._row(cu, "cdef", "off" if cdef == (0, 0)
+                          else f"{cdef[0]}/{cdef[1]} (pri/sec)")
             if aux is not None:
                 if h264_intra is not None and h264_intra[0] is not None:
                     it = 2 if iw == 16 else 1     # exact sub-block mode + size

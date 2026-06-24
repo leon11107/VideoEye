@@ -158,6 +158,10 @@ class FrameAnalysis:
     # AV1 segment id per MI cell (0..7), at qp_unit granularity. None for other
     # codecs / when not requested.
     av1_segment_id: Optional[np.ndarray] = None
+    # AV1 CDEF luma primary / secondary strength per MI cell (0 = no CDEF), at
+    # qp_unit granularity. None for other codecs / when not requested.
+    av1_cdef_level: Optional[np.ndarray] = None
+    av1_cdef_strength: Optional[np.ndarray] = None
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -216,6 +220,18 @@ class FrameAnalysis:
                 or col >= self.av1_segment_id.shape[1]):
             return None
         return int(self.av1_segment_id[row, col])
+
+    def cdef_at(self, px: int, py: int):
+        """AV1 CDEF (luma primary, secondary) strength covering pixel (px, py),
+        or None if no CDEF data. (0, 0) means CDEF applies no filtering here.
+        Indexed at qp_unit granularity (the AV1 MI grid)."""
+        if self.av1_cdef_level is None or px < 0 or py < 0:
+            return None
+        row, col = py // self.qp_unit, px // self.qp_unit
+        if (row >= self.av1_cdef_level.shape[0]
+                or col >= self.av1_cdef_level.shape[1]):
+            return None
+        return int(self.av1_cdef_level[row, col]), int(self.av1_cdef_strength[row, col])
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

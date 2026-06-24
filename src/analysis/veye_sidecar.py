@@ -63,7 +63,8 @@ _REC_AV1 = np.dtype([
     ("qp", "<i4"),
     ("mv0_x", "<i2"), ("mv0_y", "<i2"), ("mv1_x", "<i2"), ("mv1_y", "<i2"),
     ("ref0", "i1"), ("ref1", "i1"), ("tx_size", "u1"), ("palette", "u1"),
-    ("filter_intra", "i1"), ("segment_id", "u1"), ("_pad", "V2"),
+    ("filter_intra", "i1"), ("segment_id", "u1"),
+    ("cdef_level", "u1"), ("cdef_strength", "u1"),
 ])
 
 # HEVC motion vectors are stored in quarter-pel luma units.
@@ -163,6 +164,8 @@ class VeyeFrameBlocks:
     palette: Optional[np.ndarray] = None    # AV1: luma palette size (0=none, 2..8)
     filter_intra: Optional[np.ndarray] = None  # AV1: filter-intra mode 0..4, -1 none
     segment_id: Optional[np.ndarray] = None  # AV1: segment id 0..7 (segmentation)
+    cdef_level: Optional[np.ndarray] = None  # AV1: CDEF luma primary strength
+    cdef_strength: Optional[np.ndarray] = None  # AV1: CDEF luma secondary strength
     # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
     # each (grid_h, grid_w) int32.
     mb_total_bits: Optional[np.ndarray] = None
@@ -424,6 +427,8 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             palette=recs["palette"].reshape(grid_h, grid_w).copy(),
             filter_intra=recs["filter_intra"].reshape(grid_h, grid_w).copy(),
             segment_id=recs["segment_id"].reshape(grid_h, grid_w).copy(),
+            cdef_level=recs["cdef_level"].reshape(grid_h, grid_w).copy(),
+            cdef_strength=recs["cdef_strength"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
         )
