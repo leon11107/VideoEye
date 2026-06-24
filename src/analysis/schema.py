@@ -162,6 +162,10 @@ class FrameAnalysis:
     # qp_unit granularity. None for other codecs / when not requested.
     av1_cdef_level: Optional[np.ndarray] = None
     av1_cdef_strength: Optional[np.ndarray] = None
+    # AV1 per-plane (Y, U, V) loop-restoration frame type (0..3) and unit size
+    # (px). Frame-level (same for every block of the frame).
+    av1_lr_type: tuple = ()
+    av1_lr_unit_size: tuple = ()
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.

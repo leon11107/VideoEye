@@ -262,7 +262,7 @@ index 911d5c3..8df29c6 100644
      // CTB-level flags affecting loop filter operation
      uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..8d23865 100644
+index 2d817c7..c690b93 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
 @@ -7,25 +7,51 @@
@@ -545,7 +545,7 @@ index 2d817c7..8d23865 100644
      if (!sd)
          return AVERROR(ENOMEM);
  
-@@ -142,31 +320,279 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -142,31 +320,290 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -601,10 +601,10 @@ index 2d817c7..8d23865 100644
 +            }
 +            rec->part_mode = tab_part_mode ? tab_part_mode[cb] : 0;
 +            rec->ct_depth  = (uint8_t)depth;  /* CU coding-tree depth (0=CTB) */
-+            rec++;
-+        }
-+    }
-+
+             rec++;
+         }
+     }
+ 
 +    /* Append the luma TU-size grid (min-TB granularity), after the records
 +     * and the VeyeTuHeader that veye_hevc_side_data already wrote. */
 +    {
@@ -702,9 +702,10 @@ index 2d817c7..8d23865 100644
 +
 +    n    = (size_t)fd->mi_cols * (size_t)fd->mi_rows;
 +    /* v5: a reference section (own + referenced display orders) is appended
-+     * after the records, mirroring the H.264/HEVC layout. */
++     * after the records, mirroring the H.264/HEVC layout.
++     * v16: a frame-level loop-restoration section follows the ref section. */
 +    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecordAV1)
-+           + sizeof(VeyeRefHeader);
++           + sizeof(VeyeRefHeader) + sizeof(VeyeLrSection);
 +
 +    buf = av_malloc(size);
 +    if (!buf)
@@ -750,10 +751,10 @@ index 2d817c7..8d23865 100644
 +                if (rf >= 1 && rf <= 7)
 +                    slot_used[rf - 1] = 1;
 +            }
-             rec++;
-         }
-     }
- 
++            rec++;
++        }
++    }
++
 +    /* Reference section: own display order, plus used references split into
 +     * past (L0) and future (L1) by display order, de-duplicated. AV1 has no
 +     * L0/L1 lists, so this split is purely for the consumer's two-color
@@ -782,6 +783,16 @@ index 2d817c7..8d23865 100644
 +                if (rh->l1_poc[j] == oh) { dup = 1; break; }
 +            if (!dup && rh->nb_l1 < VEYE_MAX_REFS)
 +                rh->l1_poc[rh->nb_l1++] = oh;
++        }
++    }
++
++    /* v16: frame-level loop-restoration section, right after the ref section. */
++    {
++        VeyeLrSection *lr = (VeyeLrSection *)((uint8_t *)rh
++                                              + sizeof(VeyeRefHeader));
++        for (i = 0; i < 3; i++) {
++            lr->lr_type[i] = fd->lr_type[i];
++            lr->lr_unit_size[i] = fd->lr_unit_size[i];
 +        }
 +    }
 +
@@ -831,7 +842,7 @@ index 2d817c7..8d23865 100644
      return 0;
  }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..7c446c0 100644
+index eadfb7b..1e51c0d 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,17 @@
@@ -839,7 +850,7 @@ index eadfb7b..7c446c0 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 15
++#define VEYE_BI_VERSION 16
 +
 +/* H.264 per-MB scratch stride (int32 per MB) in the decoder's veye_mb_bits
 + * table: [0]=total [1]=prediction [2]=transform bits, [3]=intra type
@@ -915,7 +926,7 @@ index eadfb7b..7c446c0 100644
  /*
   * HEVC cells are emitted at min-CB (typically 8x8) granularity. Unlike the
   * fixed-size H.264 macroblock, an HEVC coding unit spans a variable number
-@@ -49,10 +114,70 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -49,10 +114,80 @@ typedef struct VeyeBlockRecordHEVC {
      uint8_t  cu_log2;     ///< log2 of the luma CU size in pixels (3..6)
      uint8_t  pred;        ///< PredType: 1 intra, 2 inter, 3 skip, 4 pcm
      uint8_t  intra_mode;  ///< luma intra prediction mode 0..34 (intra only)
@@ -960,6 +971,16 @@ index eadfb7b..7c446c0 100644
 +} VeyeRefHeader;
 +
 +/*
++ * VideoEye v16 (AV1): a frame-level loop-restoration section appended after the
++ * reference section. Per-plane (Y, U, V) FrameRestorationType (0 none, 1 Wiener,
++ * 2 SGRPROJ, 3 switchable) and restoration-unit size in pixels.
++ */
++typedef struct VeyeLrSection {
++    int32_t lr_type[3];
++    int32_t lr_unit_size[3];
++} VeyeLrSection;
++
++/*
 + * VideoEye v6 (HEVC): after the reference section, a picture-structure section
 + * describes slice and tile partitioning. A VeyeStructHeader is followed by:
 + *   - int32  slice_id[ctb_width * ctb_height]   (CTB raster; -1 = undecoded)
@@ -987,7 +1008,7 @@ index eadfb7b..7c446c0 100644
  /**
   * Serialize a per-cell grid into AV_FRAME_DATA_VEYE_BLOCKINFO side data and
   * attach it to @p frame. Reads are indexed with @p grid_stride; output is
-@@ -61,6 +186,12 @@ typedef struct VeyeBlockRecordHEVC {
+@@ -61,6 +196,12 @@ typedef struct VeyeBlockRecordHEVC {
   */
  int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
                               const uint32_t *mb_type, const int8_t *qscale,
@@ -1000,7 +1021,7 @@ index eadfb7b..7c446c0 100644
                               int grid_w, int grid_h, int grid_stride,
                               int block_unit);
  
-@@ -74,7 +205,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
+@@ -74,7 +215,11 @@ int ff_veye_export_blockinfo(AVFrame *frame, enum AVCodecID codec_id,
   * frame. Records are zero-initialized. Returns 0 on success/skip, ENOMEM else.
   */
  int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
@@ -1013,7 +1034,7 @@ index eadfb7b..7c446c0 100644
  
  /**
   * Serialize an HEVC min-CB grid into AV_FRAME_DATA_VEYE_BLOCKINFO. The HEVC
-@@ -83,26 +218,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
+@@ -83,26 +228,50 @@ int ff_veye_alloc_blockinfo_hevc(AVFrame *frame, int min_cb_width,
   * pre-allocated by ff_veye_alloc_blockinfo_hevc() (filling it in place) when
   * one is already attached, otherwise allocates a fresh one.
   *

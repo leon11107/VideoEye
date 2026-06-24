@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 
 from ..analysis import (
     PredType, block_type_label, qp_field_name, av1_filter_intra_name,
-    h264_intra_mode_name, h264_mb_type_label,
+    av1_restoration_name, h264_intra_mode_name, h264_mb_type_label,
 )
 from .overlay import OVERLAYS, DEFAULT_ON, OVERLAY_GROUPS
 from .overlay_icons import overlay_icon
@@ -372,6 +372,16 @@ class BlockHoverPanel(QWidget):
                 # (primary, secondary) luma CDEF strength; 0/0 = no filtering.
                 self._row(cu, "cdef", "off" if cdef == (0, 0)
                           else f"{cdef[0]}/{cdef[1]} (pri/sec)")
+            lr = info.get("av1_lr")
+            if codec == "av1" and lr and len(lr) == 3:
+                # Frame-level loop restoration type per plane (same for every
+                # block of the frame). All-None -> "off".
+                if any(lr):
+                    self._row(cu, "loop restoration",
+                              "Y=%s U=%s V=%s" % tuple(av1_restoration_name(t)
+                                                       for t in lr))
+                else:
+                    self._row(cu, "loop restoration", "off")
             if aux is not None:
                 if h264_intra is not None and h264_intra[0] is not None:
                     it = 2 if iw == 16 else 1     # exact sub-block mode + size

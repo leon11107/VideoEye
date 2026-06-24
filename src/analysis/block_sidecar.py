@@ -111,7 +111,7 @@ class BlockSidecar:
         # The trailing tag is the sidecar record format; bump it whenever the
         # .veblk record layout changes so stale caches are regenerated.
         key = hashlib.sha1(
-            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v18"
+            f"{os.path.abspath(video_path)}|{st.st_size}|{int(st.st_mtime)}|v19"
             .encode()
         ).hexdigest()[:16]
         out = Path(tempfile.gettempdir()) / f"veye_{key}.veblk"
@@ -346,6 +346,14 @@ class BlockSidecar:
         if fb is None:
             return None, None
         return fb.cdef_level, fb.cdef_strength
+
+    def lr_for(self, frame_index: int):
+        """AV1 frame-level loop-restoration (lr_type, lr_unit_size) per-plane
+        tuples, or ((), ())."""
+        fb = self._frame(frame_index)
+        if fb is None:
+            return (), ()
+        return fb.lr_type, fb.lr_unit_size
 
     def intra_modes_for(self, frame_index: int) -> Optional[np.ndarray]:
         """Intra-prediction records (INTRA_DTYPE) for a frame, or None."""

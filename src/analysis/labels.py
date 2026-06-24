@@ -37,6 +37,20 @@ def av1_filter_intra_name(mode: int) -> str:
     return f"filter-intra {mode}"
 
 
+# libaom RestorationType enum (av1/common/restoration.h): the *remapped*
+# FrameRestorationType the decoder uses, NOT the coded lr_type syntax element
+# (Elecard prints the coded value, which maps coded 1<->2/3 via Remap_Lr_Type;
+# both resolve to the same names here).
+_AV1_RESTORATION = ("None", "Wiener", "SGRPROJ", "Switchable")
+
+
+def av1_restoration_name(lr_type: int) -> str:
+    """Name for an AV1 loop-restoration frame type (0..3)."""
+    if 0 <= lr_type < len(_AV1_RESTORATION):
+        return _AV1_RESTORATION[lr_type]
+    return f"lr {lr_type}"
+
+
 def block_type_label(codec: str, mode: int) -> str:
     """Name for a coding block's BLOCK_DTYPE['mode'] value, per codec."""
     if codec == "av1":

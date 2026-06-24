@@ -37,6 +37,9 @@ _TU_HDR = struct.Struct("<III")
 # 16 i32 L0 ref POCs and 16 i32 L1 ref POCs.
 _MAX_REFS = 16
 _REF_HDR = struct.Struct("<iii%di%di" % (_MAX_REFS, _MAX_REFS))
+# v16 AV1: frame-level loop-restoration section after the ref header ->
+# i32 lr_type[3] (0 none/1 Wiener/2 SGRPROJ/3 switchable), i32 lr_unit_size[3].
+_LR_HDR = struct.Struct("<6i")
 # v6 HEVC: appended after the ref section -> u32 ctb_size, ctb_w, ctb_h,
 # num_tile_cols, num_tile_rows, then ctb_w*ctb_h i32 slice ids (CTB raster),
 # then (num_tile_cols+1) u32 tile column x-boundaries and (num_tile_rows+1)
@@ -166,6 +169,8 @@ class VeyeFrameBlocks:
     segment_id: Optional[np.ndarray] = None  # AV1: segment id 0..7 (segmentation)
     cdef_level: Optional[np.ndarray] = None  # AV1: CDEF luma primary strength
     cdef_strength: Optional[np.ndarray] = None  # AV1: CDEF luma secondary strength
+    lr_type: tuple = ()                     # AV1: per-plane loop-restoration type
+    lr_unit_size: tuple = ()                # AV1: per-plane restoration unit px
     # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
     # each (grid_h, grid_w) int32.
     mb_total_bits: Optional[np.ndarray] = None
@@ -406,6 +411,8 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         own_poc = None
         ref_l0: tuple = ()
         ref_l1: tuple = ()
+        lr_type: tuple = ()
+        lr_unit_size: tuple = ()
         if _ver >= 5:
             ref_off = _BLK_HDR.size + n_records * _REC_AV1.itemsize
             if len(payload) >= ref_off + _REF_HDR.size:
@@ -416,6 +423,12 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                 l1 = vals[3 + _MAX_REFS:3 + 2 * _MAX_REFS]
                 ref_l0 = tuple(l0[:max(0, nb_l0)])
                 ref_l1 = tuple(l1[:max(0, nb_l1)])
+                # v16: frame-level loop-restoration section after the ref header.
+                lr_off = ref_off + _REF_HDR.size
+                if _ver >= 16 and len(payload) >= lr_off + _LR_HDR.size:
+                    lv = _LR_HDR.unpack_from(payload, lr_off)
+                    lr_type = tuple(lv[0:3])
+                    lr_unit_size = tuple(lv[3:6])
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
             qp=recs["qp"].reshape(grid_h, grid_w).copy(),
@@ -431,6 +444,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             cdef_strength=recs["cdef_strength"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
+            lr_type=lr_type, lr_unit_size=lr_unit_size,
         )
 
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,

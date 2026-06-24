@@ -72,7 +72,7 @@ index 77769bd1d5..4449c88dd9 100644
    CTRL_MAP_END,
  };
 diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
-index f84ed17d20..26a9523849 100644
+index f84ed17d20..2909cd6669 100644
 --- a/av1/decoder/inspection.c
 +++ b/av1/decoder/inspection.c
 @@ -16,6 +16,7 @@
@@ -83,7 +83,7 @@ index f84ed17d20..26a9523849 100644
  
  static void ifd_init_mi_rc(insp_frame_data *fd, int mi_cols, int mi_rows) {
    fd->mi_cols = mi_cols;
-@@ -64,6 +65,16 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -64,6 +65,22 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
    fd->tile_mi_rows = tile_info.mi_row_end - tile_info.mi_row_start;
    fd->delta_q_present_flag = cm->delta_q_info.delta_q_present_flag;
    fd->delta_q_res = cm->delta_q_info.delta_q_res;
@@ -97,10 +97,16 @@ index f84ed17d20..26a9523849 100644
 +    const RefCntBuffer *ref_buf = get_ref_frame_buf(cm, LAST_FRAME + r);
 +    fd->ref_frame_order_hint[r] = ref_buf ? (int)ref_buf->order_hint : -1;
 +  }
++  // VideoEye: per-plane loop-restoration frame type (RESTORE_NONE/WIENER/
++  // SGRPROJ/SWITCHABLE) and restoration-unit size. Frame-level, not per-MI.
++  for (int p = 0; p < 3; p++) {
++    fd->lr_type[p] = (int)cm->rst_info[p].frame_restoration_type;
++    fd->lr_unit_size[p] = cm->rst_info[p].restoration_unit_size;
++  }
  #if CONFIG_ACCOUNTING
    fd->accounting = &pbi->accounting;
  #endif
-@@ -96,6 +107,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -96,6 +113,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
        mi->intrabc = (int16_t)mbmi->use_intrabc;
        mi->palette = (int16_t)mbmi->palette_mode_info.palette_size[0];
        mi->uv_palette = (int16_t)mbmi->palette_mode_info.palette_size[1];
@@ -114,7 +120,7 @@ index f84ed17d20..26a9523849 100644
        // Prediction Mode for Chromatic planes
        if (mi->mode < INTRA_MODES) {
          mi->uv_mode = mbmi->uv_mode;
-@@ -154,8 +172,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -154,8 +178,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
          mi->cfl_alpha_idx = 0;
          mi->cfl_alpha_sign = 0;
        }
@@ -129,7 +135,7 @@ index f84ed17d20..26a9523849 100644
    }
    return 1;
 diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
-index 7d1c14db2a..841fdc5b8d 100644
+index 7d1c14db2a..a124255881 100644
 --- a/av1/decoder/inspection.h
 +++ b/av1/decoder/inspection.h
 @@ -55,6 +55,7 @@ struct insp_mi_data {
@@ -140,7 +146,7 @@ index 7d1c14db2a..841fdc5b8d 100644
  };
  
  typedef struct insp_frame_data insp_frame_data;
-@@ -79,6 +80,13 @@ struct insp_frame_data {
+@@ -79,6 +80,17 @@ struct insp_frame_data {
    int delta_q_present_flag;
    int delta_q_res;
    int show_existing_frame;
@@ -151,6 +157,10 @@ index 7d1c14db2a..841fdc5b8d 100644
 +  // includes; the value is fixed by the AV1 spec).
 +  int order_hint;
 +  int ref_frame_order_hint[7];
++  // VideoEye: per-plane (Y, U, V) loop-restoration frame type (0..3) and
++  // restoration-unit size in pixels. Frame-level.
++  int lr_type[3];
++  int lr_unit_size[3];
  };
  
  void ifd_init(insp_frame_data *fd, int frame_width, int frame_height);
