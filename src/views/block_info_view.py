@@ -405,10 +405,22 @@ class BlockHoverPanel(QWidget):
                     self._row(cd, "uv_pri_strength", str(cdef[2]))
                     self._row(cd, "uv_sec_strength", str(cdef[3]))
             lr = info.get("av1_lr")
+            coeffs = info.get("av1_lr_coeffs")
             if lr and len(lr) == 3:
                 lrs = self._section("Loop Restoration")
                 for p in range(3):
-                    self._row(lrs, f"lr_type[{p}]", av1_restoration_name(lr[p]))
+                    item = QTreeWidgetItem(
+                        lrs, [f"lr_type[{p}]", av1_restoration_name(lr[p])])
+                    c = coeffs[p] if coeffs and p < len(coeffs) else None
+                    if c and c["type"] == 1:        # Wiener: 7-tap hor/ver
+                        _kv_row(item, "hor",
+                                " ".join(str(x) for x in c["hfilter"]))
+                        _kv_row(item, "ver",
+                                " ".join(str(x) for x in c["vfilter"]))
+                    elif c and c["type"] == 2:      # SGRPROJ: set + projection
+                        _kv_row(item, "ep", str(c["ep"]))
+                        _kv_row(item, "xqd",
+                                " ".join(str(x) for x in c["xqd"]))
 
         pu = self._section("Prediction Unit")
         if mvs is not None and len(mvs) > 0:

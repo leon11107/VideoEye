@@ -72,10 +72,16 @@ index 77769bd1d5..4449c88dd9 100644
    CTRL_MAP_END,
  };
 diff --git a/av1/decoder/inspection.c b/av1/decoder/inspection.c
-index f84ed17d20..3dbb6ba036 100644
+index f84ed17d20..d42029bea7 100644
 --- a/av1/decoder/inspection.c
 +++ b/av1/decoder/inspection.c
-@@ -16,6 +16,7 @@
+@@ -11,11 +11,13 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>  // VideoEye: memcpy for the LR blob
+ 
+ #include "av1/decoder/decoder.h"
  #include "av1/decoder/inspection.h"
  #include "av1/common/enums.h"
  #include "av1/common/cdef.h"
@@ -83,7 +89,25 @@ index f84ed17d20..3dbb6ba036 100644
  
  static void ifd_init_mi_rc(insp_frame_data *fd, int mi_cols, int mi_rows) {
    fd->mi_cols = mi_cols;
-@@ -64,6 +65,22 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -32,11 +34,17 @@ void ifd_init(insp_frame_data *fd, int frame_width, int frame_height) {
+   int mi_cols = ALIGN_POWER_OF_TWO(frame_width, 3) >> MI_SIZE_LOG2;
+   int mi_rows = ALIGN_POWER_OF_TWO(frame_height, 3) >> MI_SIZE_LOG2;
+   ifd_init_mi_rc(fd, mi_cols, mi_rows);
++  fd->lr_blob = NULL;  // VideoEye
++  fd->lr_blob_size = 0;
++  fd->lr_blob_cap = 0;
+ }
+ 
+ void ifd_clear(insp_frame_data *fd) {
+   aom_free(fd->mi_grid);
+   fd->mi_grid = NULL;
++  aom_free(fd->lr_blob);  // VideoEye
++  fd->lr_blob = NULL;
++  fd->lr_blob_cap = 0;
+ }
+ 
+ /* TODO(negge) This function may be called by more than one thread when using
+@@ -64,6 +72,64 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
    fd->tile_mi_rows = tile_info.mi_row_end - tile_info.mi_row_start;
    fd->delta_q_present_flag = cm->delta_q_info.delta_q_present_flag;
    fd->delta_q_res = cm->delta_q_info.delta_q_res;
@@ -103,10 +127,52 @@ index f84ed17d20..3dbb6ba036 100644
 +    fd->lr_type[p] = (int)cm->rst_info[p].frame_restoration_type;
 +    fd->lr_unit_size[p] = cm->rst_info[p].restoration_unit_size;
 +  }
++  // VideoEye: per-restoration-unit coefficient blob. Layout, per plane p:
++  //   i32 horz_units, i32 vert_units, then (horz*vert) units in raster order,
++  //   each: i32 restoration_type, i16 hfilter[7], i16 vfilter[7], i32 sgr_ep,
++  //   i16 xqd[2]  (40 bytes/unit). Consumed verbatim by the sidecar serializer.
++  {
++    int p, u, k, lr_size = 0;
++    for (p = 0; p < 3; p++) {
++      const RestorationInfo *ri = &cm->rst_info[p];
++      int nu = (ri->unit_info && ri->num_rest_units > 0) ? ri->num_rest_units : 0;
++      lr_size += 8 + nu * 40;
++    }
++    if (lr_size > fd->lr_blob_cap) {
++      aom_free(fd->lr_blob);
++      fd->lr_blob = (uint8_t *)aom_malloc(lr_size);
++      fd->lr_blob_cap = fd->lr_blob ? lr_size : 0;
++    }
++    fd->lr_blob_size = 0;
++    if (fd->lr_blob && fd->lr_blob_cap >= lr_size) {
++      uint8_t *w = fd->lr_blob;
++#define VEYE_PUT32(V) do { int32_t v_ = (int32_t)(V); memcpy(w, &v_, 4); w += 4; } while (0)
++#define VEYE_PUT16(V) do { int16_t v_ = (int16_t)(V); memcpy(w, &v_, 2); w += 2; } while (0)
++      for (p = 0; p < 3; p++) {
++        const RestorationInfo *ri = &cm->rst_info[p];
++        int nu = (ri->unit_info && ri->num_rest_units > 0)
++                     ? ri->num_rest_units : 0;
++        VEYE_PUT32(nu ? ri->horz_units : 0);
++        VEYE_PUT32(nu ? ri->vert_units : 0);
++        for (u = 0; u < nu; u++) {
++          const RestorationUnitInfo *ru = &ri->unit_info[u];
++          VEYE_PUT32(ru->restoration_type);
++          for (k = 0; k < 7; k++) VEYE_PUT16(ru->wiener_info.hfilter[k]);
++          for (k = 0; k < 7; k++) VEYE_PUT16(ru->wiener_info.vfilter[k]);
++          VEYE_PUT32(ru->sgrproj_info.ep);
++          VEYE_PUT16(ru->sgrproj_info.xqd[0]);
++          VEYE_PUT16(ru->sgrproj_info.xqd[1]);
++        }
++      }
++#undef VEYE_PUT32
++#undef VEYE_PUT16
++      fd->lr_blob_size = (int)(w - fd->lr_blob);
++    }
++  }
  #if CONFIG_ACCOUNTING
    fd->accounting = &pbi->accounting;
  #endif
-@@ -96,6 +113,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -96,6 +162,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
        mi->intrabc = (int16_t)mbmi->use_intrabc;
        mi->palette = (int16_t)mbmi->palette_mode_info.palette_size[0];
        mi->uv_palette = (int16_t)mbmi->palette_mode_info.palette_size[1];
@@ -120,7 +186,7 @@ index f84ed17d20..3dbb6ba036 100644
        // Prediction Mode for Chromatic planes
        if (mi->mode < INTRA_MODES) {
          mi->uv_mode = mbmi->uv_mode;
-@@ -147,6 +171,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -147,6 +220,13 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
                            CDEF_SEC_STRENGTHS;
  
        mi->cdef_strength += mi->cdef_strength == 3;
@@ -134,7 +200,7 @@ index f84ed17d20..3dbb6ba036 100644
        if (mbmi->uv_mode == UV_CFL_PRED) {
          mi->cfl_alpha_idx = mbmi->cfl_alpha_idx;
          mi->cfl_alpha_sign = mbmi->cfl_alpha_signs;
-@@ -154,8 +185,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
+@@ -154,8 +234,11 @@ int ifd_inspect(insp_frame_data *fd, void *decoder, int skip_not_transform) {
          mi->cfl_alpha_idx = 0;
          mi->cfl_alpha_sign = 0;
        }
@@ -149,7 +215,7 @@ index f84ed17d20..3dbb6ba036 100644
    }
    return 1;
 diff --git a/av1/decoder/inspection.h b/av1/decoder/inspection.h
-index 7d1c14db2a..bfbd2f6a0b 100644
+index 7d1c14db2a..77ee2fb459 100644
 --- a/av1/decoder/inspection.h
 +++ b/av1/decoder/inspection.h
 @@ -55,6 +55,9 @@ struct insp_mi_data {
@@ -162,7 +228,7 @@ index 7d1c14db2a..bfbd2f6a0b 100644
  };
  
  typedef struct insp_frame_data insp_frame_data;
-@@ -79,6 +82,17 @@ struct insp_frame_data {
+@@ -79,6 +82,22 @@ struct insp_frame_data {
    int delta_q_present_flag;
    int delta_q_res;
    int show_existing_frame;
@@ -177,6 +243,11 @@ index 7d1c14db2a..bfbd2f6a0b 100644
 +  // restoration-unit size in pixels. Frame-level.
 +  int lr_type[3];
 +  int lr_unit_size[3];
++  // VideoEye: serialized per-restoration-unit coefficient blob (built in
++  // ifd_inspect; layout documented there). Owned by the inspection data.
++  uint8_t *lr_blob;
++  int lr_blob_size;
++  int lr_blob_cap;
  };
  
  void ifd_init(insp_frame_data *fd, int frame_width, int frame_height);

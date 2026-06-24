@@ -168,6 +168,7 @@ class FrameAnalysis:
     # (px). Frame-level (same for every block of the frame).
     av1_lr_type: tuple = ()
     av1_lr_unit_size: tuple = ()
+    av1_lr_blob: bytes = b""   # per-restoration-unit coefficient blob
 
     # Future codec features attach here as named chunks (e.g. "sao",
     # "alf", "cdef") without touching this schema.
@@ -243,6 +244,16 @@ class FrameAnalysis:
                if self.av1_cdef_uv_strength is not None else 0)
         return (int(self.av1_cdef_level[row, col]),
                 int(self.av1_cdef_strength[row, col]), uvl, uvs)
+
+    def lr_coeffs_at(self, px: int, py: int):
+        """AV1 per-plane (Y, U, V) restoration-unit coefficients covering pixel
+        (px, py): a list of 3 dicts (restoration_type + Wiener/SGRPROJ params),
+        each None if that plane has no unit. None if no restoration data."""
+        if not self.av1_lr_blob or px < 0 or py < 0:
+            return None
+        from .veye_sidecar import av1_lr_unit_at  # avoid import cycle
+        return [av1_lr_unit_at(self.av1_lr_blob, self.av1_lr_unit_size, p, px, py)
+                for p in range(3)]
 
     def mvs_at(self, px: int, py: int) -> np.ndarray:
         """Motion vectors whose block covers pixel (px, py)."""

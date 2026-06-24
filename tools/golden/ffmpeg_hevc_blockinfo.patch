@@ -262,7 +262,7 @@ index 911d5c3..8df29c6 100644
      // CTB-level flags affecting loop filter operation
      uint8_t                *filter_slice_edges;
 diff --git a/libavcodec/veye_blockinfo.c b/libavcodec/veye_blockinfo.c
-index 2d817c7..ceb05fb 100644
+index 2d817c7..ff9ac83 100644
 --- a/libavcodec/veye_blockinfo.c
 +++ b/libavcodec/veye_blockinfo.c
 @@ -7,25 +7,51 @@
@@ -545,7 +545,7 @@ index 2d817c7..ceb05fb 100644
      if (!sd)
          return AVERROR(ENOMEM);
  
-@@ -142,31 +320,292 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
+@@ -142,31 +320,298 @@ int ff_veye_export_blockinfo_hevc(AVFrame *frame,
              int y_pu  = y << cb_to_pu;
              int pu    = x_pu + y_pu * min_pu_width;
              int cu_log2 = log2_ctb_size - depth;
@@ -703,9 +703,11 @@ index 2d817c7..ceb05fb 100644
 +    n    = (size_t)fd->mi_cols * (size_t)fd->mi_rows;
 +    /* v5: a reference section (own + referenced display orders) is appended
 +     * after the records, mirroring the H.264/HEVC layout.
-+     * v16: a frame-level loop-restoration section follows the ref section. */
++     * v16: a frame-level loop-restoration section follows the ref section.
++     * v18: the per-RU restoration coefficient blob follows the LR section. */
 +    size = sizeof(VeyeBlockInfoHeader) + n * sizeof(VeyeBlockRecordAV1)
-+           + sizeof(VeyeRefHeader) + sizeof(VeyeLrSection);
++           + sizeof(VeyeRefHeader) + sizeof(VeyeLrSection)
++           + (fd->lr_blob_size > 0 ? (size_t)fd->lr_blob_size : 0);
 +
 +    buf = av_malloc(size);
 +    if (!buf)
@@ -796,6 +798,10 @@ index 2d817c7..ceb05fb 100644
 +            lr->lr_type[i] = fd->lr_type[i];
 +            lr->lr_unit_size[i] = fd->lr_unit_size[i];
 +        }
++        /* v18: per-RU coefficient blob, copied verbatim after the LR section. */
++        if (fd->lr_blob_size > 0 && fd->lr_blob)
++            memcpy((uint8_t *)lr + sizeof(VeyeLrSection),
++                   fd->lr_blob, (size_t)fd->lr_blob_size);
 +    }
 +
 +    *out_buf = buf;
@@ -844,7 +850,7 @@ index 2d817c7..ceb05fb 100644
      return 0;
  }
 diff --git a/libavcodec/veye_blockinfo.h b/libavcodec/veye_blockinfo.h
-index eadfb7b..d9b4dc9 100644
+index eadfb7b..aa66370 100644
 --- a/libavcodec/veye_blockinfo.h
 +++ b/libavcodec/veye_blockinfo.h
 @@ -21,7 +21,17 @@
@@ -852,7 +858,7 @@ index eadfb7b..d9b4dc9 100644
  /* 'V','E','B','K' stored little-endian -> raw bytes read as "VEBK". */
  #define VEYE_BI_MAGIC   0x4B424556u
 -#define VEYE_BI_VERSION 1
-+#define VEYE_BI_VERSION 17
++#define VEYE_BI_VERSION 18
 +
 +/* H.264 per-MB scratch stride (int32 per MB) in the decoder's veye_mb_bits
 + * table: [0]=total [1]=prediction [2]=transform bits, [3]=intra type

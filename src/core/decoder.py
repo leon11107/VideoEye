@@ -354,7 +354,8 @@ class Decoder:
                          analysis.av1_cdef_uv_level,
                          analysis.av1_cdef_uv_strength) = \
                             self._block_sidecar.cdef_grids_for(sc_index)
-                        analysis.av1_lr_type, analysis.av1_lr_unit_size = \
+                        (analysis.av1_lr_type, analysis.av1_lr_unit_size,
+                         analysis.av1_lr_blob) = \
                             self._block_sidecar.lr_for(sc_index)
         return analysis
 

@@ -40,6 +40,10 @@ _REF_HDR = struct.Struct("<iii%di%di" % (_MAX_REFS, _MAX_REFS))
 # v16 AV1: frame-level loop-restoration section after the ref header ->
 # i32 lr_type[3] (0 none/1 Wiener/2 SGRPROJ/3 switchable), i32 lr_unit_size[3].
 _LR_HDR = struct.Struct("<6i")
+# v18 AV1: per-restoration-unit coefficient blob. Per plane: i32 horz_units,
+# i32 vert_units, then horz*vert units (raster), each = this struct (40 bytes):
+# i32 restoration_type, i16 hfilter[7], i16 vfilter[7], i32 sgr_ep, i16 xqd[2].
+_LR_UNIT = struct.Struct("<i7h7hi2h")
 # v6 HEVC: appended after the ref section -> u32 ctb_size, ctb_w, ctb_h,
 # num_tile_cols, num_tile_rows, then ctb_w*ctb_h i32 slice ids (CTB raster),
 # then (num_tile_cols+1) u32 tile column x-boundaries and (num_tile_rows+1)
@@ -175,6 +179,7 @@ class VeyeFrameBlocks:
     cdef_uv_strength: Optional[np.ndarray] = None  # AV1: CDEF chroma secondary
     lr_type: tuple = ()                     # AV1: per-plane loop-restoration type
     lr_unit_size: tuple = ()                # AV1: per-plane restoration unit px
+    lr_blob: bytes = b""                    # AV1: per-RU restoration coeff blob
     # H.264 per-MB coded bit cost (v8): total / prediction / transform bits,
     # each (grid_h, grid_w) int32.
     mb_total_bits: Optional[np.ndarray] = None
@@ -417,6 +422,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
         ref_l1: tuple = ()
         lr_type: tuple = ()
         lr_unit_size: tuple = ()
+        lr_blob: bytes = b""
         if _ver >= 5:
             ref_off = _BLK_HDR.size + n_records * _REC_AV1.itemsize
             if len(payload) >= ref_off + _REF_HDR.size:
@@ -433,6 +439,9 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
                     lv = _LR_HDR.unpack_from(payload, lr_off)
                     lr_type = tuple(lv[0:3])
                     lr_unit_size = tuple(lv[3:6])
+                    # v18: per-RU coefficient blob follows the LR section.
+                    if _ver >= 18:
+                        lr_blob = bytes(payload[lr_off + _LR_HDR.size:])
         return VeyeFrameBlocks(
             codec_id, grid_w, grid_h, block_unit,
             qp=recs["qp"].reshape(grid_h, grid_w).copy(),
@@ -450,7 +459,7 @@ def _parse_payload(payload: bytes) -> Optional[VeyeFrameBlocks]:
             cdef_uv_strength=recs["cdef_uv_strength"].reshape(grid_h, grid_w).copy(),
             mv=mv, ref_idx=ref,
             own_poc=own_poc, ref_l0=ref_l0, ref_l1=ref_l1,
-            lr_type=lr_type, lr_unit_size=lr_unit_size,
+            lr_type=lr_type, lr_unit_size=lr_unit_size, lr_blob=lr_blob,
         )
 
     recs = np.frombuffer(payload, dtype=_REC, count=n_records,
@@ -1204,6 +1213,39 @@ def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:
     if fb.qp is None:
         return None
     return fb.qp.astype(np.int16)
+
+
+def av1_lr_unit_at(lr_blob: bytes, lr_unit_size, plane: int, px: int, py: int,
+                   subsampling: int = 1):
+    """AV1 per-restoration-unit coefficients for the unit covering luma pixel
+    (px, py) in `plane` (0=Y, 1=U, 2=V), or None. Returns a dict with the
+    restoration_type and Wiener (hfilter/vfilter) + SGRPROJ (ep/xqd) params of
+    that unit. `subsampling` is the chroma shift (1 for 4:2:0)."""
+    blob = lr_blob
+    if not blob or plane not in (0, 1, 2):
+        return None
+    off = 0
+    for p in range(3):
+        if len(blob) < off + 8:
+            return None
+        horz, vert = struct.unpack_from("<ii", blob, off)
+        off += 8
+        nu = horz * vert
+        if p == plane:
+            us = lr_unit_size[plane] if plane < len(lr_unit_size) else 0
+            if horz <= 0 or vert <= 0 or us <= 0:
+                return None
+            ss = subsampling if plane > 0 else 0
+            col = min((px >> ss) // us, horz - 1)
+            row = min((py >> ss) // us, vert - 1)
+            eoff = off + (row * horz + col) * _LR_UNIT.size
+            if len(blob) < eoff + _LR_UNIT.size:
+                return None
+            v = _LR_UNIT.unpack_from(blob, eoff)
+            return {"type": v[0], "hfilter": v[1:8], "vfilter": v[8:15],
+                    "ep": v[15], "xqd": v[16:18]}
+        off += nu * _LR_UNIT.size
+    return None
 
 
 def mvs_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:

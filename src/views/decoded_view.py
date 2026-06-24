@@ -344,6 +344,7 @@ class DecodedView(QWidget):
             "av1_segment_id": a.segment_id_at(px, py),     # AV1 segment id | None
             "av1_cdef": a.cdef_at(px, py),                 # AV1 (pri,sec) | None
             "av1_lr": a.av1_lr_type,           # AV1 per-plane LR types (frame-level)
+            "av1_lr_coeffs": a.lr_coeffs_at(px, py),  # per-RU LR coeffs | None
         }
 
     def _show_block_at(self, px: int, py: int, locked: bool = False) -> None:
