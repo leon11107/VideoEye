@@ -39,6 +39,20 @@ class FrameInfo:
     nalu_count: int = 0
     is_multi_slice: bool = False
 
+    # AV1 decode-order model: an MP4 sample (one packet) bundles several coded
+    # frames, so for AV1 each FrameInfo is one *coded* frame in decode order.
+    # parent_packet is the owning MP4 sample index, packet_byte_off the frame's
+    # byte offset within that sample (for on-demand byte reads). order_hint maps
+    # a real coded frame to its block analysis; display_index is the output
+    # ordinal for display events (shown / show_existing), None for hidden frames.
+    # For non-AV1, each frame is its own packet (parent_packet == index).
+    parent_packet: int = -1
+    packet_byte_off: int = 0
+    order_hint: Optional[int] = None
+    show_frame: Optional[bool] = None
+    show_existing: bool = False
+    display_index: Optional[int] = None
+
     def __str__(self) -> str:
         return (f"Frame {self.index}: {self.frame_type.value}-frame, "
                 f"{self.size} bytes, keyframe={self.is_keyframe}")

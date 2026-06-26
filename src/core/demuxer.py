@@ -28,6 +28,12 @@ class Demuxer:
         self._reader_stream = None
         self._reader_iter = None
         self._reader_pos: int = -1  # Last frame index read by reader
+        # AV1: a coded frame's bytes are a slice of its parent MP4 sample, so
+        # cache the most-recently-read packet (several coded frames share one).
+        self._av1_iter = None
+        self._av1_pkt_pos: int = -1
+        self._av1_cache_idx: int = -1
+        self._av1_cache_bytes: bytes = b""
         # Persistent file handle for O(1) byte-offset packet reads (raw
         # streams, where a packet's bytes are exactly file[pos:pos+size]).
         self._byte_reader = None
@@ -74,6 +80,10 @@ class Demuxer:
         """Close the current file and release all resources."""
         self._reader_iter = None
         self._reader_pos = -1
+        self._av1_iter = None
+        self._av1_pkt_pos = -1
+        self._av1_cache_idx = -1
+        self._av1_cache_bytes = b""
         if self._reader:
             try:
                 self._reader.close()
@@ -118,6 +128,10 @@ class Demuxer:
 
         frame = self._frames[frame_index]
 
+        # AV1: the coded frame is a byte slice of its parent MP4 sample.
+        if frame.parent_packet >= 0:
+            return self._read_av1_frame(frame)
+
         # Sequential fast-path: continue from current reader position
         if (
             self._reader_iter is not None
@@ -127,6 +141,40 @@ class Demuxer:
 
         # Random access: seek then scan forward
         return self._reader_seek_and_read(frame_index, frame)
+
+    def _read_av1_frame(self, frame: FrameInfo) -> bytes:
+        """Return one AV1 coded frame's bytes: its slice of the parent MP4
+        sample. The parent packet is cached, so the several coded frames in one
+        temporal unit are read with a single packet fetch."""
+        ppkt = frame.parent_packet
+        if self._av1_cache_idx != ppkt:
+            self._av1_cache_bytes = self._read_parent_packet(frame)
+            self._av1_cache_idx = ppkt
+        buf = self._av1_cache_bytes
+        off = frame.packet_byte_off
+        return buf[off:off + frame.size]
+
+    def _read_parent_packet(self, frame: FrameInfo) -> bytes:
+        """Fetch the bytes of an AV1 coded frame's parent MP4 sample, located by
+        its DTS (every coded frame carries its parent packet's timestamps; DTS
+        is monotonic per packet so it identifies the sample uniquely)."""
+        use_dts = frame.dts is not None
+        seek_ts = frame.dts if use_dts else frame.pts
+        if seek_ts is None:
+            return b""
+        try:
+            self._reader.seek(seek_ts, stream=self._reader_stream)
+            for packet in self._reader.demux(self._reader_stream):
+                if packet.size == 0:
+                    continue
+                ts = packet.dts if use_dts else packet.pts
+                if ts == seek_ts:
+                    return bytes(packet)
+                if ts is not None and ts > seek_ts:
+                    break
+        except Exception as e:
+            print(f"AV1 parent-packet read error (dts={seek_ts}): {e}")
+        return b""
 
     def _reader_next(self, frame_index: int, frame: FrameInfo) -> bytes:
         """Read the next packet from the active iterator."""
@@ -255,7 +303,14 @@ class Demuxer:
         that have no container timestamps. If any frame's POC cannot be
         derived the whole stream's poc is cleared, so callers fall back to
         emission order rather than trusting a partial mapping.
+
+        AV1 is skipped entirely: its decode-order model already carries the
+        authoritative frame type (KEY/INTER) and order_hint from the OBU parse,
+        and this packet-indexed pass would mis-map (one packet bundles several
+        coded frames).
         """
+        if self.codec_name and "av1" in self.codec_name.lower():
+            return
         try:
             tmp = av.open(self._file_path)
             stream = next(
@@ -508,6 +563,22 @@ class Demuxer:
         # streams where the container reports no frame count.
         total_est = stream.frames if stream.frames and stream.frames > 0 else 0
 
+        # AV1: one MP4 sample (packet) bundles several coded frames (hidden
+        # alt-refs + the shown frame + show_existing events). Build a
+        # decode-order model -- one FrameInfo per coded frame -- so no-show
+        # frames are first-class, selectable entries (matching Elecard).
+        codec_name = ""
+        try:
+            codec_name = (stream.codec_context.name or "").lower()
+        except Exception:
+            pass
+        # PyAV reports the active decoder ("libdav1d") or codec ("av1",
+        # "libaom-av1"); "av1" is a substring of all of them.
+        if "av1" in codec_name:
+            self._extract_frames_av1(stream, time_base, fps, total_est,
+                                     progress_cb)
+            return
+
         # No seek here: the container is freshly opened (already at the
         # start), and a *failed* seek on unseekable input corrupts the
         # demuxer state so it yields almost no packets afterwards.
@@ -565,6 +636,74 @@ class Demuxer:
 
             if self._stream_info.bit_rate == 0 and self._stream_info.duration_seconds > 0:
                 self._stream_info.bit_rate = int((total_bytes * 8) / self._stream_info.duration_seconds)
+
+    def _extract_frames_av1(self, stream, time_base, fps, total_est,
+                            progress_cb) -> None:
+        """AV1 decode-order frame model: split every MP4 sample into its coded
+        frames via the OBU parser, one FrameInfo per coded frame."""
+        from .av1_obu import (split_temporal_unit, KEY_FRAME, INTRA_ONLY_FRAME)
+
+        seq = None
+        frame_index = 0
+        display_index = 0
+        packet_index = -1
+        keyframe_count = 0
+        max_bitrate = 0
+        total_bytes = 0
+
+        for packet in self._container.demux(stream):
+            if packet.size == 0:
+                continue
+            packet_index += 1
+            try:
+                coded, seq = split_temporal_unit(bytes(packet), seq)
+            except Exception as e:
+                print(f"AV1 OBU split failed at packet {packet_index}: {e}")
+                coded = []
+            ppos = (packet.pos if packet.pos is not None and packet.pos >= 0
+                    else None)
+            for cf in coded:
+                is_key = cf.frame_type == KEY_FRAME
+                if is_key:
+                    keyframe_count += 1
+                if cf.frame_type in (KEY_FRAME, INTRA_ONLY_FRAME):
+                    ftype = FrameType.I
+                else:
+                    ftype = FrameType.P   # INTER / SWITCH / show_existing
+                di = None
+                if cf.displays:
+                    di = display_index
+                    display_index += 1
+                frame = FrameInfo(
+                    index=frame_index, pts=packet.pts, dts=packet.dts, pos=ppos,
+                    duration=packet.duration, size=cf.size,
+                    is_keyframe=is_key, frame_type=ftype,
+                    time_seconds=(packet.pts * time_base
+                                  if packet.pts is not None else 0.0),
+                    parent_packet=packet_index, packet_byte_off=cf.byte_off,
+                    order_hint=cf.order_hint, show_frame=cf.show_frame,
+                    show_existing=cf.show_existing, display_index=di,
+                )
+                if fps > 0:
+                    frame.instant_bitrate = int(cf.size * 8 * fps)
+                self._frames.append(frame)
+                total_bytes += cf.size
+                max_bitrate = max(max_bitrate, frame.instant_bitrate)
+                frame_index += 1
+            if progress_cb is not None and (frame_index & 0x3F) == 0:
+                progress_cb("index", frame_index, total_est)
+
+        if progress_cb is not None:
+            progress_cb("index", frame_index, frame_index)
+
+        if self._stream_info:
+            self._stream_info.total_frames = len(self._frames)
+            self._stream_info.keyframe_count = keyframe_count
+            self._stream_info.max_bit_rate = max_bitrate
+            if (self._stream_info.bit_rate == 0
+                    and self._stream_info.duration_seconds > 0):
+                self._stream_info.bit_rate = int(
+                    (total_bytes * 8) / self._stream_info.duration_seconds)
 
     @property
     def stream_info(self) -> Optional[StreamInfo]:
