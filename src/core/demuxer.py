@@ -641,16 +641,14 @@ class Demuxer:
                             progress_cb) -> None:
         """AV1 decode-order frame model: split every MP4 sample into its coded
         frames via the OBU parser, one FrameInfo per coded frame."""
-        from .av1_obu import (split_temporal_unit, KEY_FRAME, INTRA_ONLY_FRAME)
+        from .av1_obu import (split_temporal_unit, assign_display_ranks,
+                              KEY_FRAME, INTRA_ONLY_FRAME)
 
+        # Pass 1: split every packet into its coded frames (decode order),
+        # remembering each coded frame's parent packet metadata.
         seq = None
-        frame_index = 0
-        display_index = 0
         packet_index = -1
-        keyframe_count = 0
-        max_bitrate = 0
-        total_bytes = 0
-
+        flat = []                 # (Av1CodedFrame, packet_index, pts, dts, pos, dur)
         for packet in self._container.demux(stream):
             if packet.size == 0:
                 continue
@@ -663,38 +661,39 @@ class Demuxer:
             ppos = (packet.pos if packet.pos is not None and packet.pos >= 0
                     else None)
             for cf in coded:
-                is_key = cf.frame_type == KEY_FRAME
-                if is_key:
-                    keyframe_count += 1
-                if cf.frame_type in (KEY_FRAME, INTRA_ONLY_FRAME):
-                    ftype = FrameType.I
-                else:
-                    ftype = FrameType.P   # INTER / SWITCH / show_existing
-                di = None
-                if cf.displays:
-                    di = display_index
-                    display_index += 1
-                frame = FrameInfo(
-                    index=frame_index, pts=packet.pts, dts=packet.dts, pos=ppos,
-                    duration=packet.duration, size=cf.size,
-                    is_keyframe=is_key, frame_type=ftype,
-                    time_seconds=(packet.pts * time_base
-                                  if packet.pts is not None else 0.0),
-                    parent_packet=packet_index, packet_byte_off=cf.byte_off,
-                    order_hint=cf.order_hint, show_frame=cf.show_frame,
-                    show_existing=cf.show_existing, display_index=di,
-                )
-                if fps > 0:
-                    frame.instant_bitrate = int(cf.size * 8 * fps)
-                self._frames.append(frame)
-                total_bytes += cf.size
-                max_bitrate = max(max_bitrate, frame.instant_bitrate)
-                frame_index += 1
-            if progress_cb is not None and (frame_index & 0x3F) == 0:
-                progress_cb("index", frame_index, total_est)
+                flat.append((cf, packet_index, packet.pts, packet.dts, ppos,
+                             packet.duration))
+            if progress_cb is not None and (len(flat) & 0x3F) == 0:
+                progress_cb("index", len(flat), total_est)
+
+        # Pass 2: resolve each coded frame's display rank via DPB tracking, then
+        # build the FrameInfo list (one entry per coded frame, decode order).
+        assign_display_ranks([cf for cf, *_ in flat])
+        keyframe_count = 0
+        max_bitrate = 0
+        total_bytes = 0
+        for frame_index, (cf, ppkt, pts, dts, ppos, dur) in enumerate(flat):
+            is_key = cf.frame_type == KEY_FRAME
+            if is_key:
+                keyframe_count += 1
+            ftype = (FrameType.I if cf.frame_type in (KEY_FRAME, INTRA_ONLY_FRAME)
+                     else FrameType.P)   # INTER / SWITCH / show_existing
+            frame = FrameInfo(
+                index=frame_index, pts=pts, dts=dts, pos=ppos, duration=dur,
+                size=cf.size, is_keyframe=is_key, frame_type=ftype,
+                time_seconds=pts * time_base if pts is not None else 0.0,
+                parent_packet=ppkt, packet_byte_off=cf.byte_off,
+                order_hint=cf.order_hint, show_frame=cf.show_frame,
+                show_existing=cf.show_existing, display_index=cf.display_rank,
+            )
+            if fps > 0:
+                frame.instant_bitrate = int(cf.size * 8 * fps)
+            self._frames.append(frame)
+            total_bytes += cf.size
+            max_bitrate = max(max_bitrate, frame.instant_bitrate)
 
         if progress_cb is not None:
-            progress_cb("index", frame_index, frame_index)
+            progress_cb("index", len(self._frames), len(self._frames))
 
         if self._stream_info:
             self._stream_info.total_frames = len(self._frames)

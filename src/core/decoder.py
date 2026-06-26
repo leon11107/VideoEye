@@ -708,6 +708,23 @@ class Decoder:
             for f in frames
             if f.is_keyframe and f.pos is not None
         }
+
+        # AV1 decode-order model: each FrameInfo is a coded frame and already
+        # carries its display rank (display_index), so map decode index ->
+        # display rank directly. The block sidecar is output/display ordered, so
+        # this also routes a no-show frame's block data to the rank where it is
+        # output. (Picture emission for AV1 is handled separately.)
+        if frames and any(f.parent_packet >= 0 for f in frames):
+            self._index_to_display = {
+                f.index: (f.display_index if f.display_index is not None
+                          else f.index)
+                for f in frames
+            }
+            self._display_to_index = None
+            self._pts_to_index = {}
+            self._emit_order = None
+            return
+
         self._pts_to_index = {
             f.pts: f.index for f in frames if f.pts is not None
         }

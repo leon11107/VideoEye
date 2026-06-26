@@ -41,6 +41,11 @@ class Av1CodedFrame:
     frame_type: Optional[int]       # 0..3, None for show_existing
     order_hint: Optional[int]       # None for show_existing
     frame_to_show: Optional[int]    # show_existing only: DPB slot index
+    refresh_frame_flags: int = 0    # 8-bit DPB refresh mask
+    # Display rank (0-based output ordinal). A hidden frame and the
+    # show_existing that later outputs it share the same rank. Filled by
+    # assign_display_ranks(). None until then (and for never-shown frames).
+    display_rank: Optional[int] = None
 
     @property
     def displays(self) -> bool:
@@ -173,8 +178,10 @@ def _parse_frame_header(buf, off, seq) -> dict:
     show_frame = r.f(1)
     if not show_frame:
         r.f(1)                                  # showable_frame
-    if not (frame_type == SWITCH_FRAME or (frame_type == KEY_FRAME and show_frame)):
-        r.f(1)                                  # error_resilient_mode
+    if frame_type == SWITCH_FRAME or (frame_type == KEY_FRAME and show_frame):
+        err_res = 1
+    else:
+        err_res = r.f(1)                        # error_resilient_mode
     r.f(1)                                       # disable_cdf_update
     if seq["force_screen"] == _SELECT_SCREEN_CONTENT_TOOLS:
         allow_sc = r.f(1)
@@ -187,9 +194,17 @@ def _parse_frame_header(buf, off, seq) -> dict:
     if frame_type != SWITCH_FRAME and not seq["reduced_still"]:
         r.f(1)                                   # frame_size_override_flag
     order_hint = r.f(seq["OrderHintBits"])
+    # primary_ref_frame, then the DPB refresh mask (no decoder-model path).
+    intra = frame_type in (KEY_FRAME, INTRA_ONLY_FRAME)
+    if not (intra or err_res):
+        r.f(3)                                   # primary_ref_frame
+    if frame_type == SWITCH_FRAME or (frame_type == KEY_FRAME and show_frame):
+        refresh = 0xFF
+    else:
+        refresh = r.f(8)                         # refresh_frame_flags
     return {"show_existing": 0, "frame_to_show": None,
             "frame_type": frame_type, "show_frame": show_frame,
-            "order_hint": order_hint}
+            "order_hint": order_hint, "refresh_frame_flags": refresh}
 
 
 def split_temporal_unit(buf, seq: Optional[dict]):
@@ -245,6 +260,42 @@ def split_temporal_unit(buf, seq: Optional[dict]):
             show_existing=bool(fh["show_existing"]),
             show_frame=(None if fh["show_frame"] is None else bool(fh["show_frame"])),
             frame_type=fh["frame_type"], order_hint=fh["order_hint"],
-            frame_to_show=fh["frame_to_show"]))
+            frame_to_show=fh["frame_to_show"],
+            refresh_frame_flags=fh.get("refresh_frame_flags", 0)))
         byte_off += size
     return frames, seq
+
+
+def assign_display_ranks(frames):
+    """Assign each coded frame its display rank (output ordinal) via DPB
+    tracking, resolving show_existing references precisely.
+
+    `frames` is the whole stream's coded frames in decode order. A hidden frame
+    (show_frame = 0) is output later by a show_existing_frame; both get the same
+    rank. RefSlot[i] tracks which decoded frame currently occupies DPB slot i, so
+    a show_existing's frame_to_show_map_idx points at the exact frame it outputs
+    (robust to order_hint wrap across GOPs)."""
+    ref_slot = [None] * 8        # decode index occupying each DPB slot
+    rank = 0
+    for d, f in enumerate(frames):
+        if f.show_existing:
+            shown = (ref_slot[f.frame_to_show]
+                     if f.frame_to_show is not None
+                     and 0 <= f.frame_to_show < 8 else None)
+            f.display_rank = rank
+            if shown is not None:
+                frames[shown].display_rank = rank
+                # show_existing of a KEY frame refreshes every slot with it.
+                if frames[shown].frame_type == KEY_FRAME:
+                    for i in range(8):
+                        ref_slot[i] = shown
+            rank += 1
+        else:
+            if f.show_frame:
+                f.display_rank = rank
+                rank += 1
+            mask = f.refresh_frame_flags
+            for i in range(8):
+                if mask & (1 << i):
+                    ref_slot[i] = d
+    return frames
