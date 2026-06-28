@@ -140,6 +140,10 @@ class Decoder:
         # stream at open; never relies on container timestamps.
         self._keyframe_indices: list[int] = []
         self._keyframe_pos: dict[int, int] = {}
+        # AV1 decode-order model: the decoder runs internally in display-rank
+        # space; _av1_kfrank_packet maps a keyframe rank to its MP4 sample.
+        self._av1_mode: bool = False
+        self._av1_kfrank_packet: dict[int, int] = {}
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -399,6 +403,12 @@ class Decoder:
         if not self._container or not self._video_stream:
             return None
 
+        # AV1 runs internally in display-rank space: translate the public
+        # (decode-order) frame index to its output rank. A no-show frame and the
+        # show_existing that outputs it resolve to the same rank / picture.
+        if self._av1_mode:
+            frame_index = self._index_to_display.get(frame_index, frame_index)
+
         # 1. Check LRU cache
         if frame_index in self._frame_cache:
             self._frame_cache.move_to_end(frame_index)
@@ -413,7 +423,8 @@ class Decoder:
             # inherently costs a decode from its keyframe -- same as a
             # reference decoder; sequential playback uses decode_next instead.)
             can_continue = (
-                self._packet_iter is not None
+                not self._av1_mode
+                and self._packet_iter is not None
                 and self._run_kf == kf_index
                 and self._decode_pos < frame_index
             )
@@ -461,6 +472,20 @@ class Decoder:
           demux past the preceding packets without decoding them.
         """
         kf_index, kf_pos = self._nearest_keyframe(target_index)
+
+        # AV1: target_index and kf_index are display ranks. Parse-skip to the
+        # keyframe's MP4 sample, then decode forward; emissions come out in
+        # display order, so labelling them sequentially from the keyframe rank
+        # yields the display rank of each.
+        if self._av1_mode:
+            self._reopen()
+            self._packet_iter = self._container.demux(self._video_stream)
+            self._skip_packets_to(self._av1_kfrank_packet.get(kf_index, 0))
+            self._run_kf = kf_index
+            self._decode_pos = kf_index - 1
+            self._emit_next = kf_index
+            self._emit_ptr = kf_index
+            return
 
         # Fast path: byte-offset seek straight to the keyframe (raw streams).
         if self._raw_stream and kf_pos is not None and self._open_at_offset(kf_pos):
@@ -711,19 +736,32 @@ class Decoder:
 
         # AV1 decode-order model: each FrameInfo is a coded frame and already
         # carries its display rank (display_index), so map decode index ->
-        # display rank directly. The block sidecar is output/display ordered, so
-        # this also routes a no-show frame's block data to the rank where it is
-        # output. (Picture emission for AV1 is handled separately.)
+        # display rank directly. The block sidecar and the decoder's picture
+        # emission are both display-ordered, so the decoder works internally in
+        # display-rank space for AV1 (the public frame index is translated to a
+        # rank in _get_entry). _index_to_display routes a no-show frame's block
+        # data to the rank where it is output.
         if frames and any(f.parent_packet >= 0 for f in frames):
+            self._av1_mode = True
             self._index_to_display = {
                 f.index: (f.display_index if f.display_index is not None
                           else f.index)
                 for f in frames
             }
+            # Keyframe DISPLAY ranks (shown immediately, so rank == display
+            # rank), and each keyframe rank's parent MP4 sample to seek to.
+            self._keyframe_indices = sorted(
+                f.display_index for f in frames
+                if f.is_keyframe and f.display_index is not None)
+            self._av1_kfrank_packet = {
+                f.display_index: f.parent_packet for f in frames
+                if f.is_keyframe and f.display_index is not None
+            }
             self._display_to_index = None
             self._pts_to_index = {}
             self._emit_order = None
             return
+        self._av1_mode = False
 
         self._pts_to_index = {
             f.pts: f.index for f in frames if f.pts is not None
