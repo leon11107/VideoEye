@@ -30,8 +30,6 @@ class Demuxer:
         self._reader_pos: int = -1  # Last frame index read by reader
         # AV1: a coded frame's bytes are a slice of its parent MP4 sample, so
         # cache the most-recently-read packet (several coded frames share one).
-        self._av1_iter = None
-        self._av1_pkt_pos: int = -1
         self._av1_cache_idx: int = -1
         self._av1_cache_bytes: bytes = b""
         # Persistent file handle for O(1) byte-offset packet reads (raw
@@ -80,8 +78,6 @@ class Demuxer:
         """Close the current file and release all resources."""
         self._reader_iter = None
         self._reader_pos = -1
-        self._av1_iter = None
-        self._av1_pkt_pos = -1
         self._av1_cache_idx = -1
         self._av1_cache_bytes = b""
         if self._reader:

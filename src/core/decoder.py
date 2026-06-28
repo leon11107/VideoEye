@@ -654,8 +654,10 @@ class Decoder:
         emissions before the start's display position and returns the rest.
         """
         self._seq_buffer = []
-        self._seq_skip_until_display = self._index_to_display.get(start_index, start_index)
-        self._seek_to_keyframe(start_index)
+        start_rank = self._index_to_display.get(start_index, start_index)
+        self._seq_skip_until_display = start_rank
+        # AV1 seeks/labels in display-rank space, so seek with the rank.
+        self._seek_to_keyframe(start_rank if self._av1_mode else start_index)
 
     def decode_next(self) -> Optional[tuple[int, np.ndarray, Optional[FrameAnalysis]]]:
         """Next frame in display order: (decode_index, rgb, analysis) or None.
@@ -667,9 +669,16 @@ class Decoder:
         while True:
             while self._seq_buffer:
                 index, entry = self._seq_buffer.pop(0)
-                if self._index_to_display.get(index, index) < self._seq_skip_until_display:
+                # AV1 labels emissions by display rank already; other codecs map
+                # decode index -> display rank. Return a decode-order frame index
+                # (for AV1, the real coded frame output at that rank).
+                rank = index if self._av1_mode else \
+                    self._index_to_display.get(index, index)
+                if rank < self._seq_skip_until_display:
                     continue
-                return index, entry[0], entry[1]
+                out_index = (self._av1_rank_to_decode.get(index, index)
+                             if self._av1_mode else index)
+                return out_index, entry[0], entry[1]
             if self._packet_iter is None:
                 return None
             # Pull the next packet that yields at least one frame.
