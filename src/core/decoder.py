@@ -144,6 +144,7 @@ class Decoder:
         # space; _av1_kfrank_packet maps a keyframe rank to its MP4 sample.
         self._av1_mode: bool = False
         self._av1_kfrank_packet: dict[int, int] = {}
+        self._av1_rank_to_decode: dict[int, int] = {}
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -372,6 +373,13 @@ class Decoder:
         r = self._block_sidecar.refs_for(sc_index)
         if r is None:
             return None
+        # AV1: sidecar indices are display ranks; map each to the real coded
+        # frame output there (so a reference points at the alt-ref entry, not the
+        # show_existing).
+        if self._av1_mode:
+            m = self._av1_rank_to_decode
+            conv = lambda lst: [m[d] for d in lst if d in m]
+            return conv(r[0]), conv(r[1])
         # sidecar indices are display order; map back to decode order.
         if not self._index_to_display:
             return list(r[0]), list(r[1])
@@ -756,6 +764,13 @@ class Decoder:
             self._av1_kfrank_packet = {
                 f.display_index: f.parent_packet for f in frames
                 if f.is_keyframe and f.display_index is not None
+            }
+            # rank -> the real coded frame output at that rank (a reference is a
+            # decoded frame, so prefer the alt-ref/shown frame over the
+            # show_existing that merely re-displays it).
+            self._av1_rank_to_decode = {
+                f.display_index: f.index for f in frames
+                if not f.show_existing and f.display_index is not None
             }
             self._display_to_index = None
             self._pts_to_index = {}
