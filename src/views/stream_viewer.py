@@ -139,8 +139,13 @@ class StreamViewer(QWidget):
         else:
             nalus = self._nalu_parser.parse_extradata_h264(extradata)
             parser = self._h264_parser
-        # Parse (populates parser context) and keep them for display.
-        self._param_sets = [(nalu, parser.parse_nalu(nalu)) for nalu in nalus]
+        # Parse (populates parser context) and keep the *parameter sets* for
+        # display. hvcC may also carry SEI (e.g. x265 build info); SEI is not a
+        # sequence-level parameter set but per-frame supplemental data, so it is
+        # excluded here -- it only shows on frames whose packet actually carries
+        # one (via the per-frame NALU path).
+        self._param_sets = [(nalu, parser.parse_nalu(nalu)) for nalu in nalus
+                            if nalu.is_parameter_set()]
 
     def display_frame(self, frame: FrameInfo, packet_data: bytes = b"") -> None:
         """Display the frame's bitstream structure: NAL units for H.264/HEVC,
