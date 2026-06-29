@@ -47,6 +47,15 @@ class BarChartWidget(QWidget):
         self.setMouseTracking(True)
         self.setMinimumHeight(100)
 
+    @staticmethod
+    def _emphasize(color: QColor, factor: int) -> QColor:
+        """Selection/hover highlight that stays visible on either theme. A
+        light bar (e.g. the pale no-show gray) washed out to white would vanish
+        on the light theme's white background, so darken light colors and
+        lighten dark/saturated ones."""
+        return (color.darker(factor) if color.lightness() > 170
+                else color.lighter(factor))
+
     def set_ref_markers(self, l0: list[int], l1: list[int]) -> None:
         """Mark the selected frame's L0 (blue) / L1 (green) reference frames."""
         if l0 == self._ref_l0 and l1 == self._ref_l1:
@@ -174,12 +183,12 @@ class BarChartWidget(QWidget):
             # frames; show_frame is None for codecs without the concept.
             if frame.show_frame is False:
                 color = self.NOSHOW_COLOR
-            # Subtle bar lightening; the precise position is marked by the
-            # vertical cursor lines drawn on top (see _draw_cursors).
+            # Subtle selection/hover emphasis; the precise position is marked by
+            # the vertical cursor lines drawn on top (see _draw_cursors).
             if i == self._selected_index:
-                color = color.lighter(140)
+                color = self._emphasize(color, 140)
             elif i == self._hover_index:
-                color = color.lighter(120)
+                color = self._emphasize(color, 120)
 
             painter.fillRect(
                 QRectF(x, height - bar_height - 10, bw, bar_height), color)
