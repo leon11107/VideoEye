@@ -14,6 +14,12 @@ from PyQt6.QtGui import QFont
 
 from ..theme import current_theme
 
+# Selection highlight styles (kept as a single continuous span per row so the
+# highlight reads like a mouse-drag selection -- the inter-byte spaces inside
+# the run are covered too, not just the byte glyphs).
+_HEX_HL = "background-color: #264f78; color: #ffffff;"
+_ASCII_HL = "background-color: #264f78;"
+
 
 class HexViewer(QWidget):
     """Displays hex dump of binary data."""
@@ -181,40 +187,46 @@ class HexViewer(QWidget):
             offset_str = (f'<span style="color: #569cd6;">'
                           f'{self._base_addr + offset:08X}</span>')
 
-            # Hex bytes
-            if empty or full:
-                hex_parts = [f'{b:02X}' for b in chunk]
-            else:
-                hex_parts = [
-                    (f'<span style="background-color: #264f78; color: #ffffff;">'
-                     f'{b:02X}</span>'
-                     if hl_s <= offset + i < hl_e else f'{b:02X}')
-                    for i, b in enumerate(chunk)]
+            # Hex bytes. Render plain, then splice the highlight in as ONE
+            # continuous span -- on a partial row this covers the spaces between
+            # bytes too, so it reads like a drag-selection instead of separate
+            # per-byte blocks.
+            hex_parts = [f'{b:02X}' for b in chunk]
             while len(hex_parts) < bpl:
                 hex_parts.append('  ')
             hex_groups = [' '.join(hex_parts[i:i + 8])
                           for i in range(0, len(hex_parts), 8)]
             hex_str = '  '.join(hex_groups)
             if full:
-                hex_str = (f'<span style="background-color: #264f78;'
-                           f' color: #ffffff;">{hex_str}</span>')
+                hex_str = f'<span style="{_HEX_HL}">{hex_str}</span>'
+            elif not empty:
+                lo = max(0, hl_s - offset)
+                hi = min(len(chunk), hl_e - offset) - 1
+                # Char span of bytes lo..hi within hex_str: 8 bytes per group
+                # (23 chars) + a 2-char gap between groups; 3 chars per byte.
+                c0 = (lo // 8) * 25 + (lo % 8) * 3
+                c1 = (hi // 8) * 25 + (hi % 8) * 3 + 2
+                hex_str = (f'{hex_str[:c0]}<span style="{_HEX_HL}">'
+                           f'{hex_str[c0:c1]}</span>{hex_str[c1:]}')
             hex_lines.append(f'{offset_str}  {hex_str}')
 
-            # ASCII column
+            # ASCII column (one continuous span, same idea -- ascii chars are
+            # already adjacent so the run is gap-free).
             ascii_chars = []
             for b in chunk:
                 ch = chr(b) if 32 <= b < 127 else '.'
                 ascii_chars.append({'<': '&lt;', '>': '&gt;', '&': '&amp;'}.get(ch, ch))
-            if empty or full:
+            if full:
+                ascii_str = f'<span style="{_ASCII_HL}">{"".join(ascii_chars)}</span>'
+            elif empty:
                 ascii_str = ''.join(ascii_chars)
-                if full:
-                    ascii_str = (f'<span style="background-color: #264f78;">'
-                                 f'{ascii_str}</span>')
             else:
-                ascii_str = ''.join(
-                    (f'<span style="background-color: #264f78;">{c}</span>'
-                     if hl_s <= offset + i < hl_e else c)
-                    for i, c in enumerate(ascii_chars))
+                lo = max(0, hl_s - offset)
+                hi = min(len(chunk), hl_e - offset)
+                ascii_str = (f'{"".join(ascii_chars[:lo])}'
+                             f'<span style="{_ASCII_HL}">'
+                             f'{"".join(ascii_chars[lo:hi])}</span>'
+                             f'{"".join(ascii_chars[hi:])}')
             ascii_lines.append(
                 f'<span style="color: #ce9178;">{ascii_str}</span>')
 
