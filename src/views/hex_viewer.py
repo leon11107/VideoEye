@@ -21,8 +21,9 @@ class HexViewer(QWidget):
     # Max bytes rendered at once. A 4K intra frame's packet can be 1-2 MB;
     # rendering it all as per-byte HTML spans froze the UI on every frame
     # select. We render a bounded window (with absolute offsets) and recenter
-    # it on the selected NAL unit / scrolled-to offset instead.
-    WINDOW_BYTES = 64 * 1024
+    # it on the selected NAL unit / scrolled-to offset instead. 16 KB (1024
+    # lines) renders fast while showing plenty of context around the selection.
+    WINDOW_BYTES = 16 * 1024
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -166,51 +167,56 @@ class HexViewer(QWidget):
         ascii_lines = []
         offset = win_start
 
+        hl_s, hl_e = self._highlight_start, self._highlight_end
         while offset < win_end:
             chunk = self._data[offset:offset + bpl]
+            line_end = offset + len(chunk)
+            # Whole-line highlight state, so a fully-selected line (the common
+            # case inside a large OBU) emits a single span instead of one per
+            # byte -- the difference between ~1k and ~16k spans per window.
+            full = hl_e > hl_s and hl_s <= offset and line_end <= hl_e
+            empty = hl_s < 0 or hl_e <= offset or hl_s >= line_end
 
             # Offset column (absolute file address: base + window offset)
             offset_str = (f'<span style="color: #569cd6;">'
                           f'{self._base_addr + offset:08X}</span>')
 
             # Hex bytes
-            hex_parts = []
-            for i, byte in enumerate(chunk):
-                byte_offset = offset + i
-                if self._highlight_start <= byte_offset < self._highlight_end:
-                    hex_parts.append(f'<span style="background-color: #264f78; color: #ffffff;">{byte:02X}</span>')
-                else:
-                    hex_parts.append(f'{byte:02X}')
-
-            # Pad if necessary
+            if empty or full:
+                hex_parts = [f'{b:02X}' for b in chunk]
+            else:
+                hex_parts = [
+                    (f'<span style="background-color: #264f78; color: #ffffff;">'
+                     f'{b:02X}</span>'
+                     if hl_s <= offset + i < hl_e else f'{b:02X}')
+                    for i, b in enumerate(chunk)]
             while len(hex_parts) < bpl:
                 hex_parts.append('  ')
-
-            # Group bytes (8 bytes per group)
-            hex_groups = []
-            for i in range(0, len(hex_parts), 8):
-                hex_groups.append(' '.join(hex_parts[i:i+8]))
+            hex_groups = [' '.join(hex_parts[i:i + 8])
+                          for i in range(0, len(hex_parts), 8)]
             hex_str = '  '.join(hex_groups)
+            if full:
+                hex_str = (f'<span style="background-color: #264f78;'
+                           f' color: #ffffff;">{hex_str}</span>')
             hex_lines.append(f'{offset_str}  {hex_str}')
 
             # ASCII column
-            ascii_parts = []
-            for i, byte in enumerate(chunk):
-                byte_offset = offset + i
-                char = chr(byte) if 32 <= byte < 127 else '.'
-                if char == '<':
-                    char = '&lt;'
-                elif char == '>':
-                    char = '&gt;'
-                elif char == '&':
-                    char = '&amp;'
-
-                if self._highlight_start <= byte_offset < self._highlight_end:
-                    ascii_parts.append(f'<span style="background-color: #264f78;">{char}</span>')
-                else:
-                    ascii_parts.append(char)
+            ascii_chars = []
+            for b in chunk:
+                ch = chr(b) if 32 <= b < 127 else '.'
+                ascii_chars.append({'<': '&lt;', '>': '&gt;', '&': '&amp;'}.get(ch, ch))
+            if empty or full:
+                ascii_str = ''.join(ascii_chars)
+                if full:
+                    ascii_str = (f'<span style="background-color: #264f78;">'
+                                 f'{ascii_str}</span>')
+            else:
+                ascii_str = ''.join(
+                    (f'<span style="background-color: #264f78;">{c}</span>'
+                     if hl_s <= offset + i < hl_e else c)
+                    for i, c in enumerate(ascii_chars))
             ascii_lines.append(
-                f'<span style="color: #ce9178;">{"".join(ascii_parts)}</span>')
+                f'<span style="color: #ce9178;">{ascii_str}</span>')
 
             offset += bpl
 
@@ -221,10 +227,16 @@ class HexViewer(QWidget):
 
     def set_highlight(self, start: int, end: int) -> None:
         """Set highlight range."""
+        new_win = self._window_for(start) if start >= 0 else self._win_start
+        # Re-rendering the window is the expensive step; skip it when neither the
+        # highlight nor the window actually change (e.g. clicking different
+        # fields of the same already-selected OBU).
+        if (start == self._highlight_start and end == self._highlight_end
+                and new_win == self._win_start):
+            return
         self._highlight_start = start
         self._highlight_end = end
-        if start >= 0:
-            self._win_start = self._window_for(start)
+        self._win_start = new_win
         self._update_display()
 
     def clear_highlight(self) -> None:
