@@ -148,6 +148,7 @@ class Decoder:
         self._av1_oh_to_decode: dict[int, list[int]] = {}
         # decode index -> (l0, l1) references resolved from the bitstream.
         self._av1_refs: dict[int, tuple] = {}
+        self._av1_sb_size = 64          # superblock px (64/128), stream-constant
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -297,6 +298,11 @@ class Decoder:
         if not entry:
             return None
         analysis = entry[1]
+        # AV1 superblock size (block-index ruler / hover granularity); from the
+        # bitstream, independent of the sidecar.
+        if (self._av1_mode and analysis is not None
+                and analysis.sb_size is None):
+            analysis.sb_size = self._av1_sb_size
         # Fill block-level fields from the sidecar on first access, only
         # where the extractor left them unset (so mainline H.264 mv/qp are
         # not overwritten). The analysis object is shared with the cache, so
@@ -819,6 +825,8 @@ class Decoder:
                 f.index: (f.av1_ref_l0, f.av1_ref_l1) for f in frames
                 if f.av1_ref_l0 is not None
             }
+            self._av1_sb_size = next(
+                (f.av1_sb_size for f in frames if f.av1_sb_size), 64)
             self._display_to_index = None
             self._pts_to_index = {}
             self._emit_order = None

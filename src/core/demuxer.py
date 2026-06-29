@@ -665,6 +665,9 @@ class Demuxer:
         # Pass 2: resolve each coded frame's display rank via DPB tracking, then
         # build the FrameInfo list (one entry per coded frame, decode order).
         assign_display_ranks([cf for cf, *_ in flat])
+        # Superblock size (stream-constant): the block-index ruler / hover region
+        # granularity. AV1's max SB is 128x128; use_128x128_superblock picks it.
+        sb_size = 128 if (seq and seq.get("use_128x128")) else 64
         keyframe_count = 0
         max_bitrate = 0
         total_bytes = 0
@@ -682,6 +685,7 @@ class Demuxer:
                 order_hint=cf.order_hint, show_frame=cf.show_frame,
                 show_existing=cf.show_existing, display_index=cf.display_rank,
                 av1_ref_l0=cf.ref_decode_l0, av1_ref_l1=cf.ref_decode_l1,
+                av1_sb_size=sb_size,
             )
             if fps > 0:
                 frame.instant_bitrate = int(cf.size * 8 * fps)

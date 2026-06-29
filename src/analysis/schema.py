@@ -136,6 +136,9 @@ class FrameAnalysis:
     slice_grid: Optional[np.ndarray] = None
     tile_col_bd: tuple = ()
     tile_row_bd: tuple = ()
+    # AV1 superblock size in px (64 or 128, per use_128x128_superblock) -- the
+    # block-index ruler / hover region granularity. None for other codecs.
+    sb_size: Optional[int] = None
 
     # H.264 per-MB aux at qp_unit (16px) granularity: intra type (0 inter/skip,
     # 1 I_NxN, 2 I_16x16, 3 PCM), canonical luma intra mode (-1 if not intra),

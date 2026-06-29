@@ -155,7 +155,8 @@ def parse_sequence_header(buf, off) -> dict:
     s["id_len"] = 0
     if frame_id:
         s["id_len"] = (r.f(4) + 2) + (r.f(3) + 1)
-    r.f(1); r.f(1); r.f(1)                      # 128x128, filter_intra, intra_edge
+    s["use_128x128"] = r.f(1)                   # use_128x128_superblock
+    r.f(1); r.f(1)                              # filter_intra, intra_edge
     if reduced:
         s["enable_order_hint"] = 0
         s["OrderHintBits"] = 0

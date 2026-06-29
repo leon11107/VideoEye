@@ -388,10 +388,9 @@ class DecodedView(QWidget):
         self._show_block_at(*coord, locked=True)
 
     def _lcu_region(self, px: int, py: int) -> QRect:
-        """The LCU/MB cell (native px) containing (px, py): 16 for H.264, 64
-        for HEVC/AV1."""
-        codec = (self._analysis.codec or "").lower()
-        size = 16 if codec in ("h264", "avc") else 64
+        """The superblock/LCU/MB cell (native px) containing (px, py); see
+        _ruler_unit for the per-codec size (AV1 honours its 64/128 SB)."""
+        size = self._ruler_unit()
         rx = (px // size) * size
         ry = (py // size) * size
         w = min(size, self._pixmap.width() - rx)
@@ -492,10 +491,16 @@ class DecodedView(QWidget):
         self._update_rulers()
 
     def _ruler_unit(self) -> int:
-        """Native px per index cell: the MB (16) for H.264, LCU/SB (64) for
-        HEVC/AV1 -- so the index numbers a block's row/column."""
-        codec = (self._analysis.codec or "").lower() if self._analysis else ""
-        return 16 if codec in ("h264", "avc") else 64
+        """Native px per index cell, so the index numbers a block's row/column:
+        the MB (16) for H.264, the superblock for AV1 (64 or 128, per
+        use_128x128_superblock), the LCU (64) for HEVC."""
+        a = self._analysis
+        codec = (a.codec or "").lower() if a else ""
+        if codec in ("h264", "avc"):
+            return 16
+        if codec == "av1":
+            return a.sb_size or 64
+        return 64
 
     def _update_rulers(self) -> None:
         if getattr(self, "_top_ruler", None) is not None:

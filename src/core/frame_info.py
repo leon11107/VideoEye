@@ -57,6 +57,8 @@ class FrameInfo:
     # resolved (non-AV1, show_existing, or unparsed) -> caller falls back.
     av1_ref_l0: Optional[list] = None
     av1_ref_l1: Optional[list] = None
+    # AV1 superblock size in px (64 or 128); stream-constant. None for non-AV1.
+    av1_sb_size: Optional[int] = None
 
     def __str__(self) -> str:
         return (f"Frame {self.index}: {self.frame_type.value}-frame, "
