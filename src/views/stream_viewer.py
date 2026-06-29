@@ -170,39 +170,12 @@ class StreamViewer(QWidget):
             f"{frame.size:,} bytes | {len(self._nalus)} NALUs {multi_slice}"
         )
 
-        # Create frame root item
-        frame_item = QTreeWidgetItem([
-            f"Frame {frame.index} ({frame.frame_type.value}-Frame)",
-            f"{frame.size:,} bytes"
-        ])
-        frame_item.setExpanded(True)
-
-        # Set color based on frame type
-        colors = {
-            FrameType.I: QColor(220, 80, 80),
-            FrameType.P: QColor(80, 180, 80),
-            FrameType.B: QColor(80, 120, 220),
-        }
-        color = colors.get(frame.frame_type, QColor(150, 150, 150))
-        frame_item.setForeground(0, color)
-
-        # Add frame metadata
-        if frame.pts is not None:
-            self._add_item(frame_item, "PTS", str(frame.pts))
-        if frame.dts is not None:
-            self._add_item(frame_item, "DTS", str(frame.dts))
-        self._add_item(frame_item, "Time", f"{frame.time_seconds:.3f}s")
-        self._add_item(frame_item, "Keyframe", "Yes" if frame.is_keyframe else "No")
-
-        # Add NAL units
-        for i, nalu in enumerate(self._nalus):
-            nalu_item = self._create_nalu_item(i, nalu)
-            frame_item.addChild(nalu_item)
-
-        # Parameter sets (SPS/PPS/VPS) live in the avcC/hvcC extradata, not the
-        # per-frame packets, so surface them at the top of the tree.
+        # Pure bitstream structure: the extradata parameter sets (SPS/PPS/VPS),
+        # then this frame's NAL units -- all top-level. Frame timing / keyframe
+        # flag isn't NAL syntax and lives in the frame panels.
         self._add_param_sets_item()
-        self._tree.addTopLevelItem(frame_item)
+        for i, nalu in enumerate(self._nalus):
+            self._tree.addTopLevelItem(self._create_nalu_item(i, nalu))
 
     def _add_param_sets_item(self) -> None:
         """Show the extradata SPS/PPS/VPS as top-level nodes (they aren't in the
@@ -230,50 +203,9 @@ class StreamViewer(QWidget):
             f"{len(self._obus)} OBUs"
         )
 
-        frame_item = QTreeWidgetItem([
-            f"Frame {frame.index} ({frame.frame_type.value}-Frame)",
-            f"{frame.size:,} bytes"
-        ])
-        frame_item.setExpanded(True)
-        colors = {FrameType.I: QColor(220, 80, 80), FrameType.P: QColor(80, 180, 80)}
-        frame_item.setForeground(0, colors.get(frame.frame_type, QColor(150, 150, 150)))
-
-        # AV1 frame-level metadata resolved by the demuxer/decode-order model
-        # (decode + display ordering and references the raw header doesn't give).
-        if frame.pts is not None:
-            self._add_item(frame_item, "PTS", str(frame.pts))
-        self._add_item(frame_item, "Time", f"{frame.time_seconds:.3f}s")
-        self._add_item(frame_item, "decode_index", str(frame.index))
-        if frame.display_index is not None:
-            self._add_item(frame_item, "display_index", str(frame.display_index))
-        if frame.av1_sb_size:
-            self._add_item(frame_item, "superblock",
-                           f"{frame.av1_sb_size}x{frame.av1_sb_size}")
-        if frame.av1_ref_l0 or frame.av1_ref_l1:
-            refs = ", ".join(str(i) for i in
-                             (frame.av1_ref_l0 or []) + (frame.av1_ref_l1 or []))
-            self._add_item(frame_item, "references (decode idx)", refs)
-
-        # The sequence header (AV1's SPS analog) is hoisted to a top-level node
-        # like H.264/HEVC SPS, rather than nested in the frame. Frame OBUs (the
-        # frame header etc.) stay under the frame.
-        for i, obu in enumerate(self._obus):
-            if obu["type"] == 1:
-                continue                                 # promoted to top-level
-            label = obu["syntax"].get("_name", obu["name"])
-            obu_item = QTreeWidgetItem([
-                f"OBU {i}: {label}", f"{obu['size']:,} bytes"
-            ])
-            obu_item.setData(0, Qt.ItemDataRole.UserRole, i)
-            obu_item.setExpanded(True)
-            if obu["type"] in (3, 6, 7):                 # frame header / frame
-                obu_item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
-                                       else QColor(156, 220, 254))
-            self._add_syntax_tree(obu_item, obu["syntax"])
-            frame_item.addChild(obu_item)
-
-        # Top-level sequence header: the in-band one if this packet carries it
-        # (clickable -> highlights its bytes), else the av1C extradata one.
+        # Pure bitstream structure: sequence header first (the SPS analog), then
+        # the per-frame OBUs -- both top-level. Frame timing / decode-order /
+        # reference metadata isn't header syntax and lives in the frame panels.
         inband = [(i, o) for i, o in enumerate(self._obus) if o["type"] == 1]
         if inband:
             for i, o in inband:
@@ -281,13 +213,26 @@ class StreamViewer(QWidget):
         else:
             for o in self._av1_seq_obus:
                 self._add_av1_seq_item(o, None)
-        self._tree.addTopLevelItem(frame_item)
+
+        for i, obu in enumerate(self._obus):
+            if obu["type"] == 1:
+                continue                                 # shown above
+            item = QTreeWidgetItem(
+                [obu["syntax"].get("_name", obu["name"]), f"{obu['size']:,} bytes"])
+            item.setData(0, Qt.ItemDataRole.UserRole, i)
+            item.setExpanded(True)
+            if obu["type"] in (3, 6, 7):                 # frame header / frame
+                item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
+                                   else QColor(156, 220, 254))
+            self._add_syntax_tree(item, obu["syntax"])
+            self._tree.addTopLevelItem(item)
 
     def _add_av1_seq_item(self, obu: dict, obu_index) -> None:
         """Top-level sequence_header_obu() node (AV1's SPS analog)."""
         item = QTreeWidgetItem(
             [obu["syntax"].get("_name", obu["name"]), f"{obu['size']:,} bytes"])
         item.setForeground(0, QColor(78, 201, 176))      # teal, like SPS/PPS
+        item.setExpanded(True)
         if obu_index is not None:                        # in-band -> clickable
             item.setData(0, Qt.ItemDataRole.UserRole, obu_index)
         self._add_syntax_tree(item, obu["syntax"])
