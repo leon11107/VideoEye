@@ -8,6 +8,25 @@ from ._common import read_sei_payload_header
 from ..utils.bitstream_reader import BitstreamReader
 
 
+def _more_rbsp_data(reader: BitstreamReader) -> bool:
+    """H.264 more_rbsp_data(): true if data remains before the rbsp trailing
+    bits (the final rbsp_stop_one_bit + zero padding)."""
+    if reader.bits_remaining() <= 0:
+        return False
+    data, n = reader.data, reader._length
+    last = -1
+    for i in range(n - 1, -1, -1):
+        if data[i]:
+            last = i
+            break
+    if last < 0:
+        return False
+    b = data[last]
+    stop_bit = next(7 - j for j in range(8) if (b >> j) & 1)
+    stop_pos = last * 8 + stop_bit
+    return reader.byte_offset * 8 + reader.bit_offset < stop_pos
+
+
 class H264Parser:
     """Parses H.264/AVC NAL unit syntax."""
 
@@ -46,6 +65,10 @@ class H264Parser:
         # Store parsed parameter sets for reference
         self.sps_list: dict[int, dict] = {}
         self.pps_list: dict[int, dict] = {}
+        # Raw integer context per parameter-set id, for slice-header parsing
+        # (the display dicts above hold formatted strings for some fields).
+        self.sps_ctx: dict[int, dict] = {}
+        self.pps_ctx: dict[int, dict] = {}
 
     def parse_nalu(self, nalu: NALUnit) -> dict:
         """Parse a NAL unit and return its syntax elements."""
@@ -97,6 +120,11 @@ class H264Parser:
             seq_parameter_set_id = reader.read_ue()
             syntax["seq_parameter_set_id"] = seq_parameter_set_id
 
+            # Defaults for non-High profiles (no chroma/scaling syntax present).
+            chroma_format_idc = 1
+            separate_colour_plane_flag = 0
+            delta_pic_order_always_zero_flag = 0
+
             # High profile extensions
             if profile_idc in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138):
                 chroma_format_idc = reader.read_ue()
@@ -104,7 +132,8 @@ class H264Parser:
                 syntax["chroma_format_idc"] = f"{chroma_format_idc} ({chroma_names.get(chroma_format_idc, 'unknown')})"
 
                 if chroma_format_idc == 3:
-                    syntax["separate_colour_plane_flag"] = reader.read_flag()
+                    separate_colour_plane_flag = int(reader.read_flag())
+                    syntax["separate_colour_plane_flag"] = separate_colour_plane_flag
 
                 syntax["bit_depth_luma_minus8"] = reader.read_ue()
                 syntax["bit_depth_chroma_minus8"] = reader.read_ue()
@@ -113,12 +142,8 @@ class H264Parser:
                 seq_scaling_matrix_present_flag = reader.read_flag()
                 syntax["seq_scaling_matrix_present_flag"] = seq_scaling_matrix_present_flag
                 if seq_scaling_matrix_present_flag:
-                    # Skip scaling matrices
-                    n_scaling_list = 12 if chroma_format_idc == 3 else 8
-                    for i in range(n_scaling_list):
-                        if reader.read_flag():  # scaling_list_present_flag
-                            size = 16 if i < 6 else 64
-                            self._skip_scaling_list(reader, size)
+                    self._parse_scaling_matrix(reader, syntax, "seq",
+                                               chroma_format_idc, 0)
 
             log2_max_frame_num_minus4 = reader.read_ue()
             syntax["log2_max_frame_num_minus4"] = log2_max_frame_num_minus4
@@ -129,7 +154,8 @@ class H264Parser:
             if pic_order_cnt_type == 0:
                 syntax["log2_max_pic_order_cnt_lsb_minus4"] = reader.read_ue()
             elif pic_order_cnt_type == 1:
-                syntax["delta_pic_order_always_zero_flag"] = reader.read_flag()
+                delta_pic_order_always_zero_flag = int(reader.read_flag())
+                syntax["delta_pic_order_always_zero_flag"] = delta_pic_order_always_zero_flag
                 syntax["offset_for_non_ref_pic"] = reader.read_se()
                 syntax["offset_for_top_to_bottom_field"] = reader.read_se()
                 num_ref_frames_in_pic_order_cnt_cycle = reader.read_ue()
@@ -177,6 +203,15 @@ class H264Parser:
 
             # Store for later reference
             self.sps_list[seq_parameter_set_id] = syntax
+            self.sps_ctx[seq_parameter_set_id] = {
+                "chroma_format_idc": chroma_format_idc,
+                "separate_colour_plane_flag": separate_colour_plane_flag,
+                "log2_max_frame_num": log2_max_frame_num_minus4 + 4,
+                "pic_order_cnt_type": pic_order_cnt_type,
+                "log2_max_poc_lsb": syntax.get("log2_max_pic_order_cnt_lsb_minus4", 0) + 4,
+                "delta_pic_order_always_zero_flag": delta_pic_order_always_zero_flag,
+                "frame_mbs_only_flag": int(frame_mbs_only_flag),
+            }
 
         except EOFError:
             syntax["_parse_error"] = "Unexpected end of data"
@@ -197,32 +232,67 @@ class H264Parser:
             seq_parameter_set_id = reader.read_ue()
             syntax["seq_parameter_set_id"] = seq_parameter_set_id
 
-            entropy_coding_mode_flag = reader.read_flag()
+            entropy_coding_mode_flag = int(reader.read_flag())
             syntax["entropy_coding_mode_flag"] = f"{entropy_coding_mode_flag} ({'CABAC' if entropy_coding_mode_flag else 'CAVLC'})"
 
-            syntax["bottom_field_pic_order_in_frame_present_flag"] = reader.read_flag()
+            bottom_field_pic_order = int(reader.read_flag())
+            syntax["bottom_field_pic_order_in_frame_present_flag"] = bottom_field_pic_order
 
             num_slice_groups_minus1 = reader.read_ue()
             syntax["num_slice_groups_minus1"] = num_slice_groups_minus1
-
+            slice_group_map_type = 0
             if num_slice_groups_minus1 > 0:
                 slice_group_map_type = reader.read_ue()
                 syntax["slice_group_map_type"] = slice_group_map_type
-                # Skip slice group map parsing for simplicity
+                self._parse_slice_group_map(reader, syntax, slice_group_map_type,
+                                            num_slice_groups_minus1)
 
-            syntax["num_ref_idx_l0_default_active_minus1"] = reader.read_ue()
-            syntax["num_ref_idx_l1_default_active_minus1"] = reader.read_ue()
-            syntax["weighted_pred_flag"] = reader.read_flag()
-            syntax["weighted_bipred_idc"] = reader.read_u(2)
+            num_ref_idx_l0_default = reader.read_ue()
+            num_ref_idx_l1_default = reader.read_ue()
+            syntax["num_ref_idx_l0_default_active_minus1"] = num_ref_idx_l0_default
+            syntax["num_ref_idx_l1_default_active_minus1"] = num_ref_idx_l1_default
+            weighted_pred_flag = int(reader.read_flag())
+            weighted_bipred_idc = reader.read_u(2)
+            syntax["weighted_pred_flag"] = weighted_pred_flag
+            syntax["weighted_bipred_idc"] = weighted_bipred_idc
             syntax["pic_init_qp_minus26"] = reader.read_se()
             syntax["pic_init_qs_minus26"] = reader.read_se()
             syntax["chroma_qp_index_offset"] = reader.read_se()
-            syntax["deblocking_filter_control_present_flag"] = reader.read_flag()
-            syntax["constrained_intra_pred_flag"] = reader.read_flag()
-            syntax["redundant_pic_cnt_present_flag"] = reader.read_flag()
+            deblocking_present = int(reader.read_flag())
+            syntax["deblocking_filter_control_present_flag"] = deblocking_present
+            syntax["constrained_intra_pred_flag"] = int(reader.read_flag())
+            redundant_pic_cnt_present = int(reader.read_flag())
+            syntax["redundant_pic_cnt_present_flag"] = redundant_pic_cnt_present
+
+            # High-profile PPS extension (present when more RBSP data follows).
+            transform_8x8_mode_flag = 0
+            if _more_rbsp_data(reader):
+                transform_8x8_mode_flag = int(reader.read_flag())
+                syntax["transform_8x8_mode_flag"] = transform_8x8_mode_flag
+                pic_scaling_matrix_present = int(reader.read_flag())
+                syntax["pic_scaling_matrix_present_flag"] = pic_scaling_matrix_present
+                if pic_scaling_matrix_present:
+                    sps_chroma = self.sps_ctx.get(
+                        seq_parameter_set_id, {}).get("chroma_format_idc", 1)
+                    self._parse_scaling_matrix(reader, syntax, "pic", sps_chroma,
+                                               transform_8x8_mode_flag)
+                syntax["second_chroma_qp_index_offset"] = reader.read_se()
 
             # Store for later reference
             self.pps_list[pic_parameter_set_id] = syntax
+            self.pps_ctx[pic_parameter_set_id] = {
+                "seq_parameter_set_id": seq_parameter_set_id,
+                "entropy_coding_mode_flag": entropy_coding_mode_flag,
+                "bottom_field_pic_order": bottom_field_pic_order,
+                "num_slice_groups_minus1": num_slice_groups_minus1,
+                "slice_group_map_type": slice_group_map_type,
+                "num_ref_idx_l0_default": num_ref_idx_l0_default,
+                "num_ref_idx_l1_default": num_ref_idx_l1_default,
+                "weighted_pred_flag": weighted_pred_flag,
+                "weighted_bipred_idc": weighted_bipred_idc,
+                "deblocking_present": deblocking_present,
+                "redundant_pic_cnt_present": redundant_pic_cnt_present,
+            }
 
         except EOFError:
             syntax["_parse_error"] = "Unexpected end of data"
@@ -230,7 +300,7 @@ class H264Parser:
         return syntax
 
     def parse_slice_header(self, nalu: NALUnit) -> dict:
-        """Parse slice header."""
+        """Parse the full slice header (slice_header())."""
         syntax = OrderedDict()
         is_idr = nalu.nal_unit_type == H264NaluType.SLICE_IDR
         syntax["_name"] = "IDR Slice Header" if is_idr else "Slice Header"
@@ -238,47 +308,169 @@ class H264Parser:
         reader = BitstreamReader.from_rbsp(nalu.data[1:])
 
         try:
-            first_mb_in_slice = reader.read_ue()
-            syntax["first_mb_in_slice"] = first_mb_in_slice
+            syntax["first_mb_in_slice"] = reader.read_ue()
 
             slice_type = reader.read_ue()
             syntax["slice_type"] = f"{slice_type} ({self.SLICE_TYPES.get(slice_type, 'Unknown')})"
+            st = slice_type % 5            # 0 P, 1 B, 2 I, 3 SP, 4 SI
 
-            pic_parameter_set_id = reader.read_ue()
-            syntax["pic_parameter_set_id"] = pic_parameter_set_id
+            pps_id = reader.read_ue()
+            syntax["pic_parameter_set_id"] = pps_id
+            pps = self.pps_ctx.get(pps_id, {})
+            sps = self.sps_ctx.get(pps.get("seq_parameter_set_id", 0), {})
 
-            # Get SPS/PPS for context
-            pps = self.pps_list.get(pic_parameter_set_id, {})
-            sps_id = pps.get("seq_parameter_set_id", 0)
-            sps = self.sps_list.get(sps_id, {})
+            if sps.get("separate_colour_plane_flag"):
+                syntax["colour_plane_id"] = reader.read_u(2)
 
-            # Get log2_max_frame_num_minus4 from SPS
-            log2_max_frame_num = sps.get("log2_max_frame_num_minus4", 0) + 4
+            syntax["frame_num"] = reader.read_u(sps.get("log2_max_frame_num", 4))
 
-            frame_num = reader.read_u(log2_max_frame_num)
-            syntax["frame_num"] = frame_num
-
-            frame_mbs_only_flag = sps.get("frame_mbs_only_flag", True)
-            if not frame_mbs_only_flag:
-                field_pic_flag = reader.read_flag()
+            field_pic_flag = 0
+            if not sps.get("frame_mbs_only_flag", 1):
+                field_pic_flag = int(reader.read_flag())
                 syntax["field_pic_flag"] = field_pic_flag
                 if field_pic_flag:
-                    syntax["bottom_field_flag"] = reader.read_flag()
+                    syntax["bottom_field_flag"] = int(reader.read_flag())
 
             if is_idr:
-                idr_pic_id = reader.read_ue()
-                syntax["idr_pic_id"] = idr_pic_id
+                syntax["idr_pic_id"] = reader.read_ue()
 
-            pic_order_cnt_type = sps.get("pic_order_cnt_type", 0)
-            if pic_order_cnt_type == 0:
-                log2_max_poc = sps.get("log2_max_pic_order_cnt_lsb_minus4", 0) + 4
-                pic_order_cnt_lsb = reader.read_u(log2_max_poc)
-                syntax["pic_order_cnt_lsb"] = pic_order_cnt_lsb
+            if sps.get("pic_order_cnt_type", 0) == 0:
+                syntax["pic_order_cnt_lsb"] = reader.read_u(sps.get("log2_max_poc_lsb", 4))
+                if pps.get("bottom_field_pic_order") and not field_pic_flag:
+                    syntax["delta_pic_order_cnt_bottom"] = reader.read_se()
+            elif (sps.get("pic_order_cnt_type") == 1
+                  and not sps.get("delta_pic_order_always_zero_flag")):
+                syntax["delta_pic_order_cnt[0]"] = reader.read_se()
+                if pps.get("bottom_field_pic_order") and not field_pic_flag:
+                    syntax["delta_pic_order_cnt[1]"] = reader.read_se()
+
+            if pps.get("redundant_pic_cnt_present"):
+                syntax["redundant_pic_cnt"] = reader.read_ue()
+
+            if st == 1:                   # B
+                syntax["direct_spatial_mv_pred_flag"] = int(reader.read_flag())
+
+            num_l0 = pps.get("num_ref_idx_l0_default", 0)
+            num_l1 = pps.get("num_ref_idx_l1_default", 0)
+            if st in (0, 1, 3):           # P, B, SP
+                override = int(reader.read_flag())
+                syntax["num_ref_idx_active_override_flag"] = override
+                if override:
+                    num_l0 = reader.read_ue()
+                    syntax["num_ref_idx_l0_active_minus1"] = num_l0
+                    if st == 1:
+                        num_l1 = reader.read_ue()
+                        syntax["num_ref_idx_l1_active_minus1"] = num_l1
+
+            self._parse_ref_pic_list_modification(reader, syntax, st)
+
+            chroma_array_type = (0 if sps.get("separate_colour_plane_flag")
+                                 else sps.get("chroma_format_idc", 1))
+            wp = pps.get("weighted_pred_flag")
+            wbi = pps.get("weighted_bipred_idc")
+            if (wp and st in (0, 3)) or (wbi == 1 and st == 1):
+                self._parse_pred_weight_table(reader, syntax, st, num_l0, num_l1,
+                                              chroma_array_type)
+
+            if nalu.nal_ref_idc != 0:
+                self._parse_dec_ref_pic_marking(reader, syntax, is_idr)
+
+            if pps.get("entropy_coding_mode_flag") and st not in (2, 4):
+                syntax["cabac_init_idc"] = reader.read_ue()
+
+            syntax["slice_qp_delta"] = reader.read_se()
+
+            if st in (3, 4):              # SP, SI
+                if st == 3:
+                    syntax["sp_for_switch_flag"] = int(reader.read_flag())
+                syntax["slice_qs_delta"] = reader.read_se()
+
+            if pps.get("deblocking_present"):
+                idc = reader.read_ue()
+                syntax["disable_deblocking_filter_idc"] = idc
+                if idc != 1:
+                    syntax["slice_alpha_c0_offset_div2"] = reader.read_se()
+                    syntax["slice_beta_offset_div2"] = reader.read_se()
+
+            ng = pps.get("num_slice_groups_minus1", 0)
+            if ng > 0 and pps.get("slice_group_map_type", 0) in (3, 4, 5):
+                syntax["slice_group_change_cycle"] = "(present)"
 
         except EOFError:
             syntax["_parse_error"] = "Unexpected end of data"
 
         return syntax
+
+    # ---- slice-header sub-structures ------------------------------------ #
+
+    def _parse_ref_pic_list_modification(self, reader, syntax, st) -> None:
+        def one(suffix):
+            flag = int(reader.read_flag())
+            syntax[f"ref_pic_list_modification_flag_{suffix}"] = flag
+            if flag:
+                i = 0
+                while True:
+                    idc = reader.read_ue()
+                    syntax[f"modification_of_pic_nums_idc[{suffix}][{i}]"] = idc
+                    if idc in (0, 1):
+                        syntax[f"abs_diff_pic_num_minus1[{suffix}][{i}]"] = reader.read_ue()
+                    elif idc == 2:
+                        syntax[f"long_term_pic_num[{suffix}][{i}]"] = reader.read_ue()
+                    if idc == 3 or i > 64:
+                        break
+                    i += 1
+        if st not in (2, 4):              # not I, not SI
+            one("l0")
+        if st == 1:                       # B
+            one("l1")
+
+    def _parse_pred_weight_table(self, reader, syntax, st, num_l0, num_l1,
+                                 chroma_array_type) -> None:
+        syntax["luma_log2_weight_denom"] = reader.read_ue()
+        if chroma_array_type != 0:
+            syntax["chroma_log2_weight_denom"] = reader.read_ue()
+
+        def weights(suffix, count):
+            for i in range(count + 1):
+                lf = int(reader.read_flag())
+                syntax[f"luma_weight_{suffix}_flag[{i}]"] = lf
+                if lf:
+                    syntax[f"luma_weight_{suffix}[{i}]"] = reader.read_se()
+                    syntax[f"luma_offset_{suffix}[{i}]"] = reader.read_se()
+                if chroma_array_type != 0:
+                    cf = int(reader.read_flag())
+                    syntax[f"chroma_weight_{suffix}_flag[{i}]"] = cf
+                    if cf:
+                        for j in range(2):
+                            syntax[f"chroma_weight_{suffix}[{i}][{j}]"] = reader.read_se()
+                            syntax[f"chroma_offset_{suffix}[{i}][{j}]"] = reader.read_se()
+        weights("l0", num_l0)
+        if st == 1:
+            weights("l1", num_l1)
+
+    def _parse_dec_ref_pic_marking(self, reader, syntax, is_idr) -> None:
+        if is_idr:
+            syntax["no_output_of_prior_pics_flag"] = int(reader.read_flag())
+            syntax["long_term_reference_flag"] = int(reader.read_flag())
+        else:
+            adaptive = int(reader.read_flag())
+            syntax["adaptive_ref_pic_marking_mode_flag"] = adaptive
+            if adaptive:
+                i = 0
+                while True:
+                    mmco = reader.read_ue()
+                    syntax[f"memory_management_control_operation[{i}]"] = mmco
+                    if mmco in (1, 3):
+                        syntax[f"difference_of_pic_nums_minus1[{i}]"] = reader.read_ue()
+                    if mmco == 2:
+                        syntax[f"long_term_pic_num[{i}]"] = reader.read_ue()
+                    if mmco in (3, 6):
+                        syntax[f"long_term_frame_idx[{i}]"] = reader.read_ue()
+                    if mmco == 4:
+                        syntax[f"max_long_term_frame_idx_plus1[{i}]"] = reader.read_ue()
+                    if mmco == 0 or i > 64:
+                        break
+                    i += 1
 
     def parse_sei(self, nalu: NALUnit) -> dict:
         """Parse SEI message (basic)."""
@@ -367,27 +559,107 @@ class H264Parser:
             vui["chroma_sample_loc_type_bottom_field"] = reader.read_ue()
 
         timing_info_present_flag = reader.read_flag()
-        vui["timing_info_present_flag"] = timing_info_present_flag
+        vui["timing_info_present_flag"] = int(timing_info_present_flag)
         if timing_info_present_flag:
             num_units_in_tick = reader.read_u(32)
             time_scale = reader.read_u(32)
             vui["num_units_in_tick"] = num_units_in_tick
             vui["time_scale"] = time_scale
-            vui["fixed_frame_rate_flag"] = reader.read_flag()
+            vui["fixed_frame_rate_flag"] = int(reader.read_flag())
             if num_units_in_tick > 0:
                 vui["_calculated_fps"] = time_scale / (2 * num_units_in_tick)
 
+        nal_hrd = int(reader.read_flag())
+        vui["nal_hrd_parameters_present_flag"] = nal_hrd
+        if nal_hrd:
+            self._parse_hrd_parameters(reader, vui, "nal")
+        vcl_hrd = int(reader.read_flag())
+        vui["vcl_hrd_parameters_present_flag"] = vcl_hrd
+        if vcl_hrd:
+            self._parse_hrd_parameters(reader, vui, "vcl")
+        if nal_hrd or vcl_hrd:
+            vui["low_delay_hrd_flag"] = int(reader.read_flag())
+        vui["pic_struct_present_flag"] = int(reader.read_flag())
+
+        bitstream_restriction = int(reader.read_flag())
+        vui["bitstream_restriction_flag"] = bitstream_restriction
+        if bitstream_restriction:
+            vui["motion_vectors_over_pic_boundaries_flag"] = int(reader.read_flag())
+            vui["max_bytes_per_pic_denom"] = reader.read_ue()
+            vui["max_bits_per_mb_denom"] = reader.read_ue()
+            vui["log2_max_mv_length_horizontal"] = reader.read_ue()
+            vui["log2_max_mv_length_vertical"] = reader.read_ue()
+            vui["max_num_reorder_frames"] = reader.read_ue()
+            vui["max_dec_frame_buffering"] = reader.read_ue()
+
         return vui
 
-    def _skip_scaling_list(self, reader: BitstreamReader, size: int) -> None:
-        """Skip scaling list."""
-        last_scale = 8
-        next_scale = 8
-        for _ in range(size):
-            if next_scale != 0:
-                delta_scale = reader.read_se()
-                next_scale = (last_scale + delta_scale + 256) % 256
-            last_scale = next_scale if next_scale != 0 else last_scale
+    def _parse_hrd_parameters(self, reader: BitstreamReader, parent: dict,
+                              prefix: str) -> None:
+        """hrd_parameters() (shared by NAL and VCL HRD)."""
+        cpb_cnt_minus1 = reader.read_ue()
+        parent[f"{prefix}_cpb_cnt_minus1"] = cpb_cnt_minus1
+        parent[f"{prefix}_bit_rate_scale"] = reader.read_u(4)
+        parent[f"{prefix}_cpb_size_scale"] = reader.read_u(4)
+        for i in range(min(cpb_cnt_minus1 + 1, 32)):
+            reader.read_ue()              # bit_rate_value_minus1[i]
+            reader.read_ue()              # cpb_size_value_minus1[i]
+            reader.read_flag()            # cbr_flag[i]
+        parent[f"{prefix}_initial_cpb_removal_delay_length_minus1"] = reader.read_u(5)
+        parent[f"{prefix}_cpb_removal_delay_length_minus1"] = reader.read_u(5)
+        parent[f"{prefix}_dpb_output_delay_length_minus1"] = reader.read_u(5)
+        parent[f"{prefix}_time_offset_length"] = reader.read_u(5)
+
+    def _parse_scaling_list(self, reader: BitstreamReader, size: int):
+        """scaling_list(): returns the delta_scale list, or 'use_default'."""
+        last, nxt = 8, 8
+        deltas = []
+        use_default = False
+        for j in range(size):
+            if nxt != 0:
+                delta = reader.read_se()
+                deltas.append(delta)
+                nxt = (last + delta + 256) % 256
+                if j == 0 and nxt == 0:
+                    use_default = True
+            last = nxt if nxt != 0 else last
+        return "use_default" if use_default else deltas
+
+    def _parse_scaling_matrix(self, reader: BitstreamReader, syntax: dict,
+                              prefix: str, chroma_format_idc: int,
+                              transform_8x8: int) -> None:
+        """seq/pic scaling matrix: the present flags and each present list."""
+        if prefix == "seq":
+            count = 12 if chroma_format_idc == 3 else 8
+        else:                              # pic
+            count = 6 + (6 if chroma_format_idc == 3 else 2) * transform_8x8
+        for i in range(count):
+            present = int(reader.read_flag())
+            syntax[f"{prefix}_scaling_list_present_flag[{i}]"] = present
+            if present:
+                lst = self._parse_scaling_list(reader, 16 if i < 6 else 64)
+                syntax[f"{prefix}_scaling_list[{i}]"] = (
+                    lst if lst == "use_default" else f"{len(lst)} delta_scale")
+
+    def _parse_slice_group_map(self, reader: BitstreamReader, syntax: dict,
+                               map_type: int, num_groups_minus1: int) -> None:
+        """PPS FMO slice_group_map (rare; x264 doesn't emit it)."""
+        if map_type == 0:
+            for i in range(num_groups_minus1 + 1):
+                syntax[f"run_length_minus1[{i}]"] = reader.read_ue()
+        elif map_type == 2:
+            for i in range(num_groups_minus1):
+                syntax[f"top_left[{i}]"] = reader.read_ue()
+                syntax[f"bottom_right[{i}]"] = reader.read_ue()
+        elif map_type in (3, 4, 5):
+            syntax["slice_group_change_direction_flag"] = int(reader.read_flag())
+            syntax["slice_group_change_rate_minus1"] = reader.read_ue()
+        elif map_type == 6:
+            n = reader.read_ue()
+            syntax["pic_size_in_map_units_minus1"] = n
+            bits = max(1, (num_groups_minus1).bit_length())
+            for i in range(min(n + 1, 4096)):
+                reader.read_u(bits)        # slice_group_id[i]
 
     def get_slice_type(self, nalu: NALUnit) -> Optional[str]:
         """Get slice type from slice NAL unit."""
