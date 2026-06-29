@@ -25,9 +25,9 @@ class BarChartWidget(QWidget):
         FrameType.UNKNOWN: QColor(150, 150, 150),  # Gray for unknown
     }
     # AV1 hidden (no-show) frames -- decoded but never displayed on their own
-    # (show_frame == 0). Drawn gray so they read as "not shown" rather than as
-    # an ordinary inter (P) frame.
-    NOSHOW_COLOR = QColor(115, 115, 120)
+    # (show_frame == 0). Drawn a pale, washed-out gray (Elecard style) so they
+    # recede next to the saturated I/P/B bars instead of reading as a P frame.
+    NOSHOW_COLOR = QColor(205, 205, 210)
 
     def __init__(self, parent=None):
         super().__init__(parent)
