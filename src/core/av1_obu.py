@@ -26,6 +26,18 @@ OBU_METADATA = 5
 OBU_FRAME = 6
 OBU_REDUNDANT_FRAME_HEADER = 7
 
+OBU_TYPE_NAMES = {
+    1: "OBU_SEQUENCE_HEADER",
+    2: "OBU_TEMPORAL_DELIMITER",
+    3: "OBU_FRAME_HEADER",
+    4: "OBU_TILE_GROUP",
+    5: "OBU_METADATA",
+    6: "OBU_FRAME",
+    7: "OBU_REDUNDANT_FRAME_HEADER",
+    8: "OBU_TILE_LIST",
+    15: "OBU_PADDING",
+}
+
 KEY_FRAME, INTER_FRAME, INTRA_ONLY_FRAME, SWITCH_FRAME = 0, 1, 2, 3
 _SELECT_SCREEN_CONTENT_TOOLS = 2
 _SELECT_INTEGER_MV = 2
@@ -111,6 +123,41 @@ def _iter_obus(buf):
         payload_off = pos
         pos += size
         yield obu_type, payload_off, pos - start
+
+
+def describe_obus(buf) -> list:
+    """Enumerate the OBUs in a byte buffer for the stream viewer. Returns a list
+    of dicts {type, name, offset, size, ext, has_size, payload_off} where offset
+    and size span the whole OBU (header + payload) within buf. Header-only
+    parsing -- no sequence-header context needed, so it works on any frame's
+    bytes in isolation."""
+    out = []
+    pos, n = 0, len(buf)
+    while pos < n:
+        start = pos
+        b0 = buf[pos]
+        obu_type = (b0 >> 3) & 0xf
+        ext = (b0 >> 2) & 1
+        has_size = (b0 >> 1) & 1
+        hpos = pos + 1 + (1 if ext else 0)
+        if has_size:
+            try:
+                size, payload_off = _leb128(buf, hpos)
+            except IndexError:
+                break
+        else:
+            size, payload_off = n - hpos, hpos
+        end = payload_off + size
+        if end > n or end <= start:
+            break
+        out.append({
+            "type": obu_type,
+            "name": OBU_TYPE_NAMES.get(obu_type, f"OBU_RESERVED_{obu_type}"),
+            "offset": start, "size": end - start,
+            "ext": ext, "has_size": has_size, "payload_off": payload_off,
+        })
+        pos = end
+    return out
 
 
 def parse_sequence_header(buf, off) -> dict:

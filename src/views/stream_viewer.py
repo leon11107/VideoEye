@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from ..core.frame_info import FrameInfo, FrameType
+from ..core.av1_obu import describe_obus
 from ..theme import current_theme
 from ..parsers.nalu_parser import NALUnit, NALUParser
 from ..parsers.h264_parser import H264Parser
@@ -16,7 +17,7 @@ from ..parsers.h265_parser import H265Parser
 class StreamViewer(QWidget):
     """Displays parsed NAL unit structure in a tree view."""
 
-    nalu_selected = pyqtSignal(int, int)  # (nalu_offset, nalu_size)
+    nalu_selected = pyqtSignal(int, int)  # (unit_offset, unit_size) -- NALU or OBU
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -26,6 +27,8 @@ class StreamViewer(QWidget):
         self._h264_parser = H264Parser()
         self._h265_parser = H265Parser()
         self._is_h265 = False
+        self._is_av1 = False
+        self._obus: list[dict] = []   # AV1: enumerated OBUs of the current frame
         self._nal_codec = False
         self._setup_ui()
 
@@ -83,6 +86,7 @@ class StreamViewer(QWidget):
         """Configure for H.264 or H.265 parsing."""
         cn = codec_name.lower()
         self._is_h265 = cn in ('hevc', 'h265', 'h.265')
+        self._is_av1 = 'av1' in cn       # av1 / libdav1d / libaom-av1
         # The NALU parser only understands H.264/HEVC Annex-B/AVCC. Other codecs
         # (AV1 OBUs, etc.) must not be parsed as NAL or frame-type classification
         # reads garbage (e.g. AV1 P-frames misdetected as I).
@@ -108,12 +112,22 @@ class StreamViewer(QWidget):
                 self._h264_parser.parse_nalu(nalu)
 
     def display_frame(self, frame: FrameInfo, packet_data: bytes = b"") -> None:
-        """Display NAL unit structure for a frame's packet bytes."""
+        """Display the frame's bitstream structure: NAL units for H.264/HEVC,
+        OBUs for AV1."""
         self._tree.clear()
         self._current_frame = frame
         self._nalus = []
+        self._obus = []
 
-        if not frame or not self._nalu_parser:
+        if not frame:
+            self._info_label.setText("No frame selected")
+            return
+
+        if self._is_av1:
+            self._display_av1(frame, packet_data)
+            return
+
+        if not self._nalu_parser:
             self._info_label.setText("No frame selected")
             return
 
@@ -156,6 +170,67 @@ class StreamViewer(QWidget):
         for i, nalu in enumerate(self._nalus):
             nalu_item = self._create_nalu_item(i, nalu)
             frame_item.addChild(nalu_item)
+
+        self._tree.addTopLevelItem(frame_item)
+
+    def _display_av1(self, frame: FrameInfo, packet_data: bytes) -> None:
+        """Display the AV1 OBU structure for a coded frame (AV1 has no NALUs)."""
+        self._obus = describe_obus(packet_data) if packet_data else []
+
+        kind = "show_existing" if frame.show_existing else (
+            "no-show" if frame.show_frame is False else frame.frame_type.value)
+        self._info_label.setText(
+            f"Frame {frame.index} | {kind} | {frame.size:,} bytes | "
+            f"{len(self._obus)} OBUs"
+        )
+
+        frame_item = QTreeWidgetItem([
+            f"Frame {frame.index} ({frame.frame_type.value}-Frame)",
+            f"{frame.size:,} bytes"
+        ])
+        frame_item.setExpanded(True)
+        colors = {FrameType.I: QColor(220, 80, 80), FrameType.P: QColor(80, 180, 80)}
+        frame_item.setForeground(0, colors.get(frame.frame_type, QColor(150, 150, 150)))
+
+        # AV1 frame-level metadata (already resolved by the demuxer/OBU parser).
+        if frame.pts is not None:
+            self._add_item(frame_item, "PTS", str(frame.pts))
+        if frame.dts is not None:
+            self._add_item(frame_item, "DTS", str(frame.dts))
+        self._add_item(frame_item, "Time", f"{frame.time_seconds:.3f}s")
+        self._add_item(frame_item, "decode_index", str(frame.index))
+        if frame.display_index is not None:
+            self._add_item(frame_item, "display_index", str(frame.display_index))
+        if frame.order_hint is not None:
+            self._add_item(frame_item, "order_hint", str(frame.order_hint))
+        self._add_item(frame_item, "show_frame",
+                       "-" if frame.show_frame is None else str(bool(frame.show_frame)))
+        self._add_item(frame_item, "show_existing_frame", str(bool(frame.show_existing)))
+        self._add_item(frame_item, "keyframe", "Yes" if frame.is_keyframe else "No")
+        if frame.av1_sb_size:
+            self._add_item(frame_item, "superblock",
+                           f"{frame.av1_sb_size}x{frame.av1_sb_size}")
+        if frame.av1_ref_l0 or frame.av1_ref_l1:
+            refs = ", ".join(str(i) for i in
+                             (frame.av1_ref_l0 or []) + (frame.av1_ref_l1 or []))
+            self._add_item(frame_item, "references (decode idx)", refs)
+
+        # One node per OBU; clicking highlights its bytes in the hex viewer.
+        for i, obu in enumerate(self._obus):
+            obu_item = QTreeWidgetItem([
+                f"OBU {i}: {obu['name']}", f"{obu['size']:,} bytes"
+            ])
+            obu_item.setData(0, Qt.ItemDataRole.UserRole, i)
+            t = obu["type"]
+            if t == 1:                                   # sequence header
+                obu_item.setForeground(0, QColor(78, 201, 176))
+            elif t in (3, 6):                            # frame header / frame
+                obu_item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
+                                       else QColor(156, 220, 254))
+            self._add_item(obu_item, "obu_type", f"{t} ({obu['name']})")
+            self._add_item(obu_item, "obu_offset", str(obu["offset"]))
+            self._add_item(obu_item, "has_size_field", str(bool(obu["has_size"])))
+            frame_item.addChild(obu_item)
 
         self._tree.addTopLevelItem(frame_item)
 
@@ -239,7 +314,13 @@ class StreamViewer(QWidget):
                     break
                 parent = parent.parent()
 
-        if nalu_index is not None and 0 <= nalu_index < len(self._nalus):
+        if nalu_index is None:
+            return
+        if self._is_av1:
+            if 0 <= nalu_index < len(self._obus):
+                obu = self._obus[nalu_index]
+                self.nalu_selected.emit(obu["offset"], obu["size"])
+        elif 0 <= nalu_index < len(self._nalus):
             nalu = self._nalus[nalu_index]
             self.nalu_selected.emit(nalu.offset, nalu.size)
 
@@ -248,6 +329,7 @@ class StreamViewer(QWidget):
         self._tree.clear()
         self._current_frame = None
         self._nalus = []
+        self._obus = []
         self._info_label.setText("No frame selected")
 
     def get_frame_type_from_nalus(self, packet_data: bytes) -> FrameType:
