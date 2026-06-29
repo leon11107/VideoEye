@@ -31,6 +31,9 @@ class StreamViewer(QWidget):
         self._is_av1 = False
         self._av1_parser = Av1Parser()
         self._obus: list[dict] = []   # AV1: parsed OBUs of the current frame
+        # AV1 sequence header OBU(s) from the av1C extradata (the SPS analog),
+        # shown top-level when a packet has no in-band sequence header.
+        self._av1_seq_obus: list[dict] = []
         # H.264/HEVC parameter sets parsed from the container extradata
         # (avcC/hvcC), shown at the top of every frame since they aren't in the
         # per-frame packets. Each entry is (nalu, parsed_syntax).
@@ -98,6 +101,7 @@ class StreamViewer(QWidget):
         # reads garbage (e.g. AV1 P-frames misdetected as I).
         self._nal_codec = cn in ('h264', 'avc', 'h.264', 'hevc', 'h265', 'h.265')
         self._param_sets = []
+        self._av1_seq_obus = []
         self._nalu_parser = NALUParser(
             is_h265=self._is_h265,
             is_avc=is_avc,
@@ -115,9 +119,12 @@ class StreamViewer(QWidget):
             return
 
         if self._is_av1:
-            # av1C = 4-byte AV1CodecConfigurationRecord then configOBUs.
+            # av1C = 4-byte AV1CodecConfigurationRecord then configOBUs (the
+            # sequence header). Parsing seeds the parser state and gives us the
+            # sequence header to show top-level (the SPS analog).
             if len(extradata) > 4:
-                self._av1_parser.parse(extradata[4:])
+                obus = self._av1_parser.parse(extradata[4:])
+                self._av1_seq_obus = [o for o in obus if o["type"] == 1]
             return
 
         if not self._nalu_parser:
@@ -247,25 +254,44 @@ class StreamViewer(QWidget):
                              (frame.av1_ref_l0 or []) + (frame.av1_ref_l1 or []))
             self._add_item(frame_item, "references (decode idx)", refs)
 
-        # One node per OBU with its full parsed syntax tree; clicking any node
-        # highlights the OBU's bytes in the hex viewer.
+        # The sequence header (AV1's SPS analog) is hoisted to a top-level node
+        # like H.264/HEVC SPS, rather than nested in the frame. Frame OBUs (the
+        # frame header etc.) stay under the frame.
         for i, obu in enumerate(self._obus):
+            if obu["type"] == 1:
+                continue                                 # promoted to top-level
             label = obu["syntax"].get("_name", obu["name"])
             obu_item = QTreeWidgetItem([
                 f"OBU {i}: {label}", f"{obu['size']:,} bytes"
             ])
             obu_item.setData(0, Qt.ItemDataRole.UserRole, i)
             obu_item.setExpanded(True)
-            t = obu["type"]
-            if t == 1:                                   # sequence header
-                obu_item.setForeground(0, QColor(78, 201, 176))
-            elif t in (3, 6, 7):                         # frame header / frame
+            if obu["type"] in (3, 6, 7):                 # frame header / frame
                 obu_item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
                                        else QColor(156, 220, 254))
             self._add_syntax_tree(obu_item, obu["syntax"])
             frame_item.addChild(obu_item)
 
+        # Top-level sequence header: the in-band one if this packet carries it
+        # (clickable -> highlights its bytes), else the av1C extradata one.
+        inband = [(i, o) for i, o in enumerate(self._obus) if o["type"] == 1]
+        if inband:
+            for i, o in inband:
+                self._add_av1_seq_item(o, i)
+        else:
+            for o in self._av1_seq_obus:
+                self._add_av1_seq_item(o, None)
         self._tree.addTopLevelItem(frame_item)
+
+    def _add_av1_seq_item(self, obu: dict, obu_index) -> None:
+        """Top-level sequence_header_obu() node (AV1's SPS analog)."""
+        item = QTreeWidgetItem(
+            [obu["syntax"].get("_name", obu["name"]), f"{obu['size']:,} bytes"])
+        item.setForeground(0, QColor(78, 201, 176))      # teal, like SPS/PPS
+        if obu_index is not None:                        # in-band -> clickable
+            item.setData(0, Qt.ItemDataRole.UserRole, obu_index)
+        self._add_syntax_tree(item, obu["syntax"])
+        self._tree.addTopLevelItem(item)
 
     def _create_nalu_item(self, index: int, nalu: NALUnit) -> QTreeWidgetItem:
         """Create tree item for a NAL unit."""
