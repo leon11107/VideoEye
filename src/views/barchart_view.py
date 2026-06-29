@@ -24,6 +24,10 @@ class BarChartWidget(QWidget):
         FrameType.B: QColor(50, 180, 50),    # Green for B-frames
         FrameType.UNKNOWN: QColor(150, 150, 150),  # Gray for unknown
     }
+    # AV1 hidden (no-show) frames -- decoded but never displayed on their own
+    # (show_frame == 0). Drawn gray so they read as "not shown" rather than as
+    # an ordinary inter (P) frame.
+    NOSHOW_COLOR = QColor(115, 115, 120)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -166,6 +170,10 @@ class BarChartWidget(QWidget):
             bar_height = max(2, bar_height)  # Minimum visible height
 
             color = self.COLORS.get(frame.frame_type, self.COLORS[FrameType.UNKNOWN])
+            # AV1 hidden (no-show) frames render gray to stand apart from P
+            # frames; show_frame is None for codecs without the concept.
+            if frame.show_frame is False:
+                color = self.NOSHOW_COLOR
             # Subtle bar lightening; the precise position is marked by the
             # vertical cursor lines drawn on top (see _draw_cursors).
             if i == self._selected_index:
@@ -413,7 +421,9 @@ class LegendWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(92)
-        self.setMinimumHeight(60)
+        # Four frame-type rows (I/P/B/No-show) + the two toggles need ~112px;
+        # keep a minimum so the bottom "Refs" toggle is never clipped.
+        self.setMinimumHeight(116)
         self._bitrate_visible = False   # both overlays off by default
         self._hierarchy_visible = False
         self._bitrate_hit = QRect()     # clickable areas for the toggles
@@ -451,6 +461,7 @@ class LegendWidget(QWidget):
             (BarChartWidget.COLORS[FrameType.I], "I-frame"),
             (BarChartWidget.COLORS[FrameType.P], "P-frame"),
             (BarChartWidget.COLORS[FrameType.B], "B-frame"),
+            (BarChartWidget.NOSHOW_COLOR, "No-show"),
         ]
 
         y = 8
@@ -706,7 +717,9 @@ class BarChartView(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        # Show the horizontal scrollbar only when the chart is wider than the
+        # viewport; hide it when every bar already fits.
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # Chart + reference-hierarchy stacked in one scrolled container so they
         # share horizontal scroll and stay x-aligned.
