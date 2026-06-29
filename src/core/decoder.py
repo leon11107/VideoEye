@@ -145,6 +145,7 @@ class Decoder:
         self._av1_mode: bool = False
         self._av1_kfrank_packet: dict[int, int] = {}
         self._av1_rank_to_decode: dict[int, int] = {}
+        self._av1_oh_to_decode: dict[int, list[int]] = {}
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -370,16 +371,29 @@ class Decoder:
         if self._block_sidecar is None:
             return None
         sc_index = self._index_to_display.get(frame_index, frame_index)
+        # AV1: resolve references in decode order. The sidecar carries each
+        # reference's order_hint; the actual reference is the most recent frame
+        # with that order_hint decoded *before* this one (its DPB content), which
+        # the sidecar's display-order resolution mis-picks when order_hint wraps
+        # across GOPs (e.g. a GOP-1 frame grabbing the next GOP's keyframe).
+        if self._av1_mode:
+            raw = self._block_sidecar.ref_order_hints(sc_index)
+            if raw is None:
+                return None
+
+            def resolve(ohs):
+                out = []
+                for oh in ohs:
+                    cands = [d for d in self._av1_oh_to_decode.get(oh, ())
+                             if d < frame_index]
+                    if cands:
+                        out.append(max(cands))
+                return out
+            return resolve(raw[0]), resolve(raw[1])
+
         r = self._block_sidecar.refs_for(sc_index)
         if r is None:
             return None
-        # AV1: sidecar indices are display ranks; map each to the real coded
-        # frame output there (so a reference points at the alt-ref entry, not the
-        # show_existing).
-        if self._av1_mode:
-            m = self._av1_rank_to_decode
-            conv = lambda lst: [m[d] for d in lst if d in m]
-            return conv(r[0]), conv(r[1])
         # sidecar indices are display order; map back to decode order.
         if not self._index_to_display:
             return list(r[0]), list(r[1])
@@ -781,6 +795,15 @@ class Decoder:
                 f.display_index: f.index for f in frames
                 if not f.show_existing and f.display_index is not None
             }
+            # order_hint -> decode indices of the real coded frames carrying it
+            # (sorted), for decode-order reference resolution: a reference is the
+            # most recent matching frame decoded *before* the current one (the
+            # DPB content), which disambiguates order_hint wrap across GOPs.
+            self._av1_oh_to_decode = {}
+            for f in frames:
+                if not f.show_existing and f.order_hint is not None:
+                    self._av1_oh_to_decode.setdefault(f.order_hint, []).append(
+                        f.index)
             self._display_to_index = None
             self._pts_to_index = {}
             self._emit_order = None

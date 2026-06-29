@@ -307,6 +307,16 @@ class BlockSidecar:
 
         return resolve(fb.ref_l0), resolve(fb.ref_l1)
 
+    def ref_order_hints(self, sc_index: int):
+        """Raw (ref_l0, ref_l1) order-hint tuples for a frame, or None. Lets a
+        caller with the full decode-order frame list resolve references itself
+        (the display-order resolve() above mis-picks across GOPs when an
+        order_hint repeats)."""
+        fb = self._frame(sc_index)
+        if fb is None or fb.own_poc is None:
+            return None
+        return fb.ref_l0, fb.ref_l1
+
     def tu_luma_for(self, frame_index: int) -> Optional[np.ndarray]:
         """HEVC luma transform-unit partitions, or None if not ready."""
         fb = self._frame(frame_index)
