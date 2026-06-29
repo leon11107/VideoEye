@@ -146,6 +146,8 @@ class Decoder:
         self._av1_kfrank_packet: dict[int, int] = {}
         self._av1_rank_to_decode: dict[int, int] = {}
         self._av1_oh_to_decode: dict[int, list[int]] = {}
+        # decode index -> (l0, l1) references resolved from the bitstream.
+        self._av1_refs: dict[int, tuple] = {}
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -368,14 +370,20 @@ class Decoder:
     def refs_for(self, frame_index: int):
         """Reference frames of frame_index (decode order), as
         (l0_indices, l1_indices) in decode order, or None if unavailable."""
+        # AV1: prefer references resolved straight from the bitstream
+        # (ref_frame_idx + DPB), which matches Elecard's signaled references and
+        # needs no sidecar. The sidecar only records refs actually used by
+        # blocks, so it can be incomplete.
+        if self._av1_mode and frame_index in self._av1_refs:
+            l0, l1 = self._av1_refs[frame_index]
+            return list(l0), list(l1)
         if self._block_sidecar is None:
             return None
         sc_index = self._index_to_display.get(frame_index, frame_index)
-        # AV1: resolve references in decode order. The sidecar carries each
-        # reference's order_hint; the actual reference is the most recent frame
-        # with that order_hint decoded *before* this one (its DPB content), which
-        # the sidecar's display-order resolution mis-picks when order_hint wraps
-        # across GOPs (e.g. a GOP-1 frame grabbing the next GOP's keyframe).
+        # AV1 fallback (refs unparsed: short-signaling / frame-id): resolve via
+        # the sidecar's order_hints in decode order. The actual reference is the
+        # most recent frame with that order_hint decoded *before* this one (its
+        # DPB content), disambiguating order_hint wrap across GOPs.
         if self._av1_mode:
             raw = self._block_sidecar.ref_order_hints(sc_index)
             if raw is None:
@@ -804,6 +812,13 @@ class Decoder:
                 if not f.show_existing and f.order_hint is not None:
                     self._av1_oh_to_decode.setdefault(f.order_hint, []).append(
                         f.index)
+            # Bitstream-resolved references (decode indices), the authoritative
+            # source matching Elecard's signaled ref_frame_idx. Frames whose refs
+            # could not be parsed are absent and fall back to the sidecar.
+            self._av1_refs = {
+                f.index: (f.av1_ref_l0, f.av1_ref_l1) for f in frames
+                if f.av1_ref_l0 is not None
+            }
             self._display_to_index = None
             self._pts_to_index = {}
             self._emit_order = None

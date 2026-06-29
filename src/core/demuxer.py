@@ -681,6 +681,7 @@ class Demuxer:
                 parent_packet=ppkt, packet_byte_off=cf.byte_off,
                 order_hint=cf.order_hint, show_frame=cf.show_frame,
                 show_existing=cf.show_existing, display_index=cf.display_rank,
+                av1_ref_l0=cf.ref_decode_l0, av1_ref_l1=cf.ref_decode_l1,
             )
             if fps > 0:
                 frame.instant_bitrate = int(cf.size * 8 * fps)

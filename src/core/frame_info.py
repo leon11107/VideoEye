@@ -52,6 +52,11 @@ class FrameInfo:
     show_frame: Optional[bool] = None
     show_existing: bool = False
     display_index: Optional[int] = None
+    # AV1 references resolved from the bitstream (ref_frame_idx + DPB) as decode
+    # indices, forward group (l0) and backward group (l1). None when not
+    # resolved (non-AV1, show_existing, or unparsed) -> caller falls back.
+    av1_ref_l0: Optional[list] = None
+    av1_ref_l1: Optional[list] = None
 
     def __str__(self) -> str:
         return (f"Frame {self.index}: {self.frame_type.value}-frame, "

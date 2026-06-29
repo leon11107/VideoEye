@@ -42,10 +42,20 @@ class Av1CodedFrame:
     order_hint: Optional[int]       # None for show_existing
     frame_to_show: Optional[int]    # show_existing only: DPB slot index
     refresh_frame_flags: int = 0    # 8-bit DPB refresh mask
+    # The 7 signaled reference DPB-slot indices (ref_frame_idx[0..6] =
+    # LAST/LAST2/LAST3/GOLDEN/BWDREF/ALTREF2/ALTREF). None for intra frames and
+    # when refs were not parsed (short-signaling / frame-id present).
+    ref_frame_idx: Optional[list] = None
     # Display rank (0-based output ordinal). A hidden frame and the
     # show_existing that later outputs it share the same rank. Filled by
     # assign_display_ranks(). None until then (and for never-shown frames).
     display_rank: Optional[int] = None
+    # Resolved reference frames as decode indices, split into the forward
+    # (LAST..GOLDEN -> l0) and backward (BWDREF..ALTREF -> l1) groups. Filled by
+    # assign_display_ranks() from the DPB state. [] for intra; None when refs
+    # were not parsed (caller should fall back).
+    ref_decode_l0: Optional[list] = None
+    ref_decode_l1: Optional[list] = None
 
     @property
     def displays(self) -> bool:
@@ -173,7 +183,8 @@ def _parse_frame_header(buf, off, seq) -> dict:
     r = _BitReader(buf, off)
     if r.f(1):                                  # show_existing_frame
         return {"show_existing": 1, "frame_to_show": r.f(3),
-                "frame_type": None, "show_frame": None, "order_hint": None}
+                "frame_type": None, "show_frame": None, "order_hint": None,
+                "ref_frame_idx": None}
     frame_type = r.f(2)
     show_frame = r.f(1)
     if not show_frame:
@@ -202,9 +213,25 @@ def _parse_frame_header(buf, off, seq) -> dict:
         refresh = 0xFF
     else:
         refresh = r.f(8)                         # refresh_frame_flags
+    # Reference indices: parse far enough to read ref_frame_idx[0..6] so the
+    # caller can resolve this frame's references against the DPB. Only inter
+    # frames carry them.
+    ref_frame_idx = None
+    if not intra:
+        # error_resilient + order_hint => 8 ref_order_hint[] precede the refs.
+        if err_res and seq["enable_order_hint"]:
+            for _ in range(8):
+                r.f(seq["OrderHintBits"])
+        short = r.f(1) if seq["enable_order_hint"] else 0
+        # short signaling needs set_frame_refs() and frame-id present adds
+        # delta_frame_id bits we cannot size here; in those rare cases leave
+        # refs unresolved (None) so the caller falls back.
+        if not short and not seq["frame_id_present"]:
+            ref_frame_idx = [r.f(3) for _ in range(7)]
     return {"show_existing": 0, "frame_to_show": None,
             "frame_type": frame_type, "show_frame": show_frame,
-            "order_hint": order_hint, "refresh_frame_flags": refresh}
+            "order_hint": order_hint, "refresh_frame_flags": refresh,
+            "ref_frame_idx": ref_frame_idx}
 
 
 def split_temporal_unit(buf, seq: Optional[dict]):
@@ -254,14 +281,15 @@ def split_temporal_unit(buf, seq: Optional[dict]):
     for fh, size in raw:
         if fh is None:
             fh = {"show_existing": 0, "frame_to_show": None, "frame_type": None,
-                  "show_frame": None, "order_hint": None}
+                  "show_frame": None, "order_hint": None, "ref_frame_idx": None}
         frames.append(Av1CodedFrame(
             byte_off=byte_off, size=size,
             show_existing=bool(fh["show_existing"]),
             show_frame=(None if fh["show_frame"] is None else bool(fh["show_frame"])),
             frame_type=fh["frame_type"], order_hint=fh["order_hint"],
             frame_to_show=fh["frame_to_show"],
-            refresh_frame_flags=fh.get("refresh_frame_flags", 0)))
+            refresh_frame_flags=fh.get("refresh_frame_flags", 0),
+            ref_frame_idx=fh.get("ref_frame_idx")))
         byte_off += size
     return frames, seq
 
@@ -294,6 +322,27 @@ def assign_display_ranks(frames):
             if f.show_frame:
                 f.display_rank = rank
                 rank += 1
+            # Resolve this frame's references from the current DPB (the slot
+            # contents *before* its own refresh): ref_frame_idx[k] selects a DPB
+            # slot, whose occupant is the referenced decode index. Split into the
+            # forward (LAST..GOLDEN) and backward (BWDREF..ALTREF) groups.
+            if f.ref_frame_idx is not None:
+                def occ(k):
+                    s = f.ref_frame_idx[k]
+                    return ref_slot[s] if 0 <= s < 8 else None
+                l0, l1 = [], []
+                for k in range(4):           # LAST, LAST2, LAST3, GOLDEN
+                    v = occ(k)
+                    if v is not None and v not in l0:
+                        l0.append(v)
+                for k in range(4, 7):        # BWDREF, ALTREF2, ALTREF
+                    v = occ(k)
+                    if v is not None and v not in l0 and v not in l1:
+                        l1.append(v)
+                f.ref_decode_l0, f.ref_decode_l1 = l0, l1
+            elif f.frame_type in (KEY_FRAME, INTRA_ONLY_FRAME):
+                f.ref_decode_l0, f.ref_decode_l1 = [], []
+            # else (inter, refs unparsed): leave None so the caller falls back.
             mask = f.refresh_frame_flags
             for i in range(8):
                 if mask & (1 << i):
