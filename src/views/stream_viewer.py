@@ -37,10 +37,14 @@ class StreamViewer(QWidget):
         # AV1 sequence header OBU(s) from the av1C extradata (the SPS analog),
         # shown top-level when a packet has no in-band sequence header.
         self._av1_seq_obus: list[dict] = []
-        # H.264/HEVC parameter sets parsed from the container extradata
-        # (avcC/hvcC), shown at the top of every frame since they aren't in the
-        # per-frame packets. Each entry is (nalu, parsed_syntax).
-        self._param_sets: list[tuple] = []
+        # H.264/HEVC units parsed from the container extradata (avcC/hvcC):
+        # the parameter sets (VPS/SPS/PPS) plus any SEI it carries. These are
+        # the stream's header section -- shown once, on the first I-frame, since
+        # they aren't in the per-frame packets. Each entry is (nalu, syntax).
+        self._extradata_units: list[tuple] = []
+        # Index of the first I-frame: the only frame whose display is prefixed
+        # with the sequence-level parameter sets.
+        self._first_keyframe_index = 0
         self._nal_codec = False
         self._setup_ui()
 
@@ -103,13 +107,18 @@ class StreamViewer(QWidget):
         # (AV1 OBUs, etc.) must not be parsed as NAL or frame-type classification
         # reads garbage (e.g. AV1 P-frames misdetected as I).
         self._nal_codec = cn in ('h264', 'avc', 'h.264', 'hevc', 'h265', 'h.265')
-        self._param_sets = []
+        self._extradata_units = []
         self._av1_seq_obus = []
         self._nalu_parser = NALUParser(
             is_h265=self._is_h265,
             is_avc=is_avc,
             nal_length_size=nal_length_size
         ) if self._nal_codec else None
+
+    def set_first_keyframe(self, index: int) -> None:
+        """Tell the viewer which frame is the first I-frame -- the only frame
+        whose display is prefixed with the sequence-level parameter sets."""
+        self._first_keyframe_index = index
 
     def set_extradata(self, extradata: bytes) -> None:
         """Parse container extradata to populate parameter sets / sequence state.
@@ -139,13 +148,11 @@ class StreamViewer(QWidget):
         else:
             nalus = self._nalu_parser.parse_extradata_h264(extradata)
             parser = self._h264_parser
-        # Parse (populates parser context) and keep the *parameter sets* for
-        # display. hvcC may also carry SEI (e.g. x265 build info); SEI is not a
-        # sequence-level parameter set but per-frame supplemental data, so it is
-        # excluded here -- it only shows on frames whose packet actually carries
-        # one (via the per-frame NALU path).
-        self._param_sets = [(nalu, parser.parse_nalu(nalu)) for nalu in nalus
-                            if nalu.is_parameter_set()]
+        # Parse (populates parser context) and keep every extradata unit -- the
+        # parameter sets and any SEI hvcC carries (e.g. x265 build info). These
+        # form the stream's Annex-B header section and are shown once, on the
+        # first I-frame, in extradata order.
+        self._extradata_units = [(nalu, parser.parse_nalu(nalu)) for nalu in nalus]
 
     def display_frame(self, frame: FrameInfo, packet_data: bytes = b"") -> None:
         """Display the frame's bitstream structure: NAL units for H.264/HEVC,
@@ -178,21 +185,30 @@ class StreamViewer(QWidget):
             f"{frame.size:,} bytes | {len(self._nalus)} NALUs {multi_slice}"
         )
 
-        # Pure bitstream structure: the extradata parameter sets (SPS/PPS/VPS),
-        # then this frame's NAL units -- all top-level. Frame timing / keyframe
-        # flag isn't NAL syntax and lives in the frame panels.
-        self._add_param_sets_item()
+        # Bitstream order. The sequence headers (VPS/SPS/PPS) belong to the
+        # stream, not each frame, so they are shown once -- on the first I-frame
+        # -- followed by this frame's NAL units in stream order (prefix SEI /
+        # slice / suffix SEI). On later frames the parameter sets are dropped
+        # (whether sourced from extradata or repeated in-band) so only the
+        # per-frame NALUs remain. SEI is per-frame and always kept.
+        is_first_kf = (self._current_frame.index == self._first_keyframe_index)
+        packet_has_param_sets = any(n.is_parameter_set() for n in self._nalus)
+        if is_first_kf and not packet_has_param_sets:
+            self._add_extradata_items()
         for i, nalu in enumerate(self._nalus):
+            if nalu.is_parameter_set() and not is_first_kf:
+                continue
             self._tree.addTopLevelItem(self._create_nalu_item(i, nalu))
 
-    def _add_param_sets_item(self) -> None:
-        """Show the extradata SPS/PPS/VPS as top-level nodes (they aren't in the
-        per-frame packets)."""
-        for i, (nalu, syntax) in enumerate(self._param_sets):
+    def _add_extradata_items(self) -> None:
+        """Prefix the first I-frame with the extradata units (VPS/SPS/PPS and
+        any SEI) as top-level nodes -- they aren't in the per-frame packets."""
+        for i, (nalu, syntax) in enumerate(self._extradata_units):
             item = QTreeWidgetItem(
                 [syntax.get("_name", nalu.type_name), f"{len(nalu.data):,} bytes"])
             item.setData(0, Qt.ItemDataRole.UserRole, ("extra", i))
-            item.setForeground(0, QColor(78, 201, 176))   # teal
+            if nalu.is_parameter_set():
+                item.setForeground(0, QColor(78, 201, 176))   # teal (SPS/PPS/VPS)
             if self._is_h265:
                 self._add_item(item, "nal_unit_type", str(nalu.nal_unit_type))
             else:
@@ -347,8 +363,8 @@ class StreamViewer(QWidget):
                 # Seq OBU offsets are relative to extradata[4:] (after the
                 # 4-byte av1C config record), so shift back into full extradata.
                 self.extradata_selected.emit(4 + obu["offset"], obu["size"])
-        elif 0 <= idx < len(self._param_sets):
-            nalu = self._param_sets[idx][0]
+        elif 0 <= idx < len(self._extradata_units):
+            nalu = self._extradata_units[idx][0]
             self.extradata_selected.emit(nalu.offset, nalu.size)
 
     def clear(self) -> None:
@@ -357,7 +373,7 @@ class StreamViewer(QWidget):
         self._current_frame = None
         self._nalus = []
         self._obus = []
-        self._param_sets = []
+        self._extradata_units = []
         self._info_label.setText("No frame selected")
 
     def get_frame_type_from_nalus(self, packet_data: bytes) -> FrameType:

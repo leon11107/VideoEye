@@ -471,6 +471,13 @@ class MainWindow(QMainWindow):
             if extradata:
                 self._stream_viewer.set_extradata(extradata)
 
+            # The sequence headers are shown only on the first I-frame; tell the
+            # stream viewer which frame that is.
+            frames = self._demuxer.frames
+            first_kf = next((f.index for f in frames if f.is_keyframe),
+                            frames[0].index if frames else 0)
+            self._stream_viewer.set_first_keyframe(first_kf)
+
             # Refine frame types using NAL parsing
             self._refine_frame_types(on_progress)
 
