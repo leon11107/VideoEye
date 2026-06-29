@@ -198,27 +198,19 @@ class StreamViewer(QWidget):
         self._tree.addTopLevelItem(frame_item)
 
     def _add_param_sets_item(self) -> None:
-        """Top-level node showing the extradata SPS/PPS/VPS for the stream."""
-        if not self._param_sets:
-            return
-        ps_item = QTreeWidgetItem(
-            ["Parameter Sets (from extradata)",
-             f"{len(self._param_sets)} NAL units"])
-        ps_item.setExpanded(True)
-        ps_item.setForeground(0, QColor(78, 201, 176))    # teal
+        """Show the extradata SPS/PPS/VPS as top-level nodes (they aren't in the
+        per-frame packets)."""
         for nalu, syntax in self._param_sets:
-            child = QTreeWidgetItem(
+            item = QTreeWidgetItem(
                 [syntax.get("_name", nalu.type_name), f"{len(nalu.data):,} bytes"])
-            child.setForeground(0, QColor(78, 201, 176))
-            # nal header fields, then the parsed syntax tree.
+            item.setForeground(0, QColor(78, 201, 176))   # teal
             if self._is_h265:
-                self._add_item(child, "nal_unit_type", str(nalu.nal_unit_type))
+                self._add_item(item, "nal_unit_type", str(nalu.nal_unit_type))
             else:
-                self._add_item(child, "nal_ref_idc", str(nalu.nal_ref_idc))
-                self._add_item(child, "nal_unit_type", str(nalu.nal_unit_type))
-            self._add_syntax_tree(child, syntax)
-            ps_item.addChild(child)
-        self._tree.addTopLevelItem(ps_item)
+                self._add_item(item, "nal_ref_idc", str(nalu.nal_ref_idc))
+                self._add_item(item, "nal_unit_type", str(nalu.nal_unit_type))
+            self._add_syntax_tree(item, syntax)
+            self._tree.addTopLevelItem(item)
 
     def _display_av1(self, frame: FrameInfo, packet_data: bytes) -> None:
         """Display the AV1 OBU syntax tree for a coded frame (AV1 has no NALUs)."""
