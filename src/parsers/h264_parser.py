@@ -4,27 +4,8 @@ from typing import Optional
 from collections import OrderedDict
 
 from .nalu_parser import NALUnit, H264NaluType
-from ._common import read_sei_payload_header
+from ._common import read_sei_payload_header, more_rbsp_data as _more_rbsp_data
 from ..utils.bitstream_reader import BitstreamReader
-
-
-def _more_rbsp_data(reader: BitstreamReader) -> bool:
-    """H.264 more_rbsp_data(): true if data remains before the rbsp trailing
-    bits (the final rbsp_stop_one_bit + zero padding)."""
-    if reader.bits_remaining() <= 0:
-        return False
-    data, n = reader.data, reader._length
-    last = -1
-    for i in range(n - 1, -1, -1):
-        if data[i]:
-            last = i
-            break
-    if last < 0:
-        return False
-    b = data[last]
-    stop_bit = next(7 - j for j in range(8) if (b >> j) & 1)
-    stop_pos = last * 8 + stop_bit
-    return reader.byte_offset * 8 + reader.bit_offset < stop_pos
 
 
 class H264Parser:
