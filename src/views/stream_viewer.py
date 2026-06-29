@@ -15,7 +15,8 @@ from ..parsers.h265_parser import H265Parser
 
 
 class StreamViewer(QWidget):
-    """Displays parsed NAL unit structure in a tree view."""
+    """Displays the bitstream structure in a tree view: NAL units for
+    H.264/HEVC, OBUs for AV1."""
 
     nalu_selected = pyqtSignal(int, int)  # (unit_offset, unit_size) -- NALU or OBU
 

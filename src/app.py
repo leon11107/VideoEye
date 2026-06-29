@@ -121,20 +121,20 @@ class MainWindow(QMainWindow):
         barchart_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, barchart_dock)
 
-        # Right dock - Stream viewer (NALU tree)
+        # Right dock - Stream viewer (NALU tree for H.264/HEVC, OBU tree for AV1)
         self._stream_viewer = StreamViewer()
-        viewer_dock = QDockWidget("NALU Viewer", self)
+        viewer_dock = QDockWidget("Stream Viewer", self)
         viewer_dock.setWidget(self._stream_viewer)
         viewer_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, viewer_dock)
 
-        # Right dock - Hex viewer (split vertically below NALU viewer)
+        # Right dock - Hex viewer (split vertically below the stream viewer)
         self._hex_viewer = HexViewer()
         hex_dock = QDockWidget("Hex Viewer", self)
         hex_dock.setWidget(self._hex_viewer)
         hex_dock.setAllowedAreas(all_areas)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, hex_dock)
-        # Place NALU and Hex side by side (vertically split) instead of tabbed
+        # Place stream and hex side by side (vertically split) instead of tabbed
         self.splitDockWidget(viewer_dock, hex_dock, Qt.Orientation.Vertical)
 
         # Status bar
@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
         }
 
         # Set initial dock proportions
-        # Left (stream) : Center : Right (NALU/Hex) roughly 1:3:2
+        # Left (stream) : Center : Right (Stream/Hex) roughly 1:3:2
         self.resizeDocks(
             [stream_dock, viewer_dock],
             [240, 340],
@@ -827,9 +827,9 @@ class MainWindow(QMainWindow):
             "About VideoEye",
             "VideoEye - Video Analysis Tool\n\n"
             "A video stream analyzer similar to Elecard StreamEye.\n\n"
-            "Supports H.264/AVC and H.265/HEVC analysis with:\n"
+            "Supports H.264/AVC, H.265/HEVC and AV1 analysis with:\n"
             "• Frame visualization bar chart\n"
-            "• NAL unit syntax parsing\n"
+            "• Bitstream syntax parsing (NAL units / AV1 OBUs)\n"
             "• Hex dump viewing\n"
             "• Decoded frame display\n\n"
             "Built with Python, PyQt6, and PyAV"
