@@ -365,7 +365,9 @@ class NALUParser:
             if offset + sps_length > len(extradata):
                 break
             sps_data = extradata[offset:offset + sps_length]
-            nalu = self._parse_nalu_header(sps_data, 0, sps_length)
+            # offset is the SPS's byte position within the extradata buffer, so
+            # the stream viewer can highlight it in the hex view.
+            nalu = self._parse_nalu_header(sps_data, offset, sps_length)
             nalus.append(nalu)
             offset += sps_length
 
@@ -381,7 +383,7 @@ class NALUParser:
                 if offset + pps_length > len(extradata):
                     break
                 pps_data = extradata[offset:offset + pps_length]
-                nalu = self._parse_nalu_header(pps_data, 0, pps_length)
+                nalu = self._parse_nalu_header(pps_data, offset, pps_length)
                 nalus.append(nalu)
                 offset += pps_length
 
@@ -414,7 +416,9 @@ class NALUParser:
                 if offset + nalu_length > len(extradata):
                     break
                 nalu_data = extradata[offset:offset + nalu_length]
-                nalu = self._parse_nalu_header(nalu_data, 0, nalu_length)
+                # offset = byte position within the hvcC extradata, for hex
+                # highlighting from the stream viewer.
+                nalu = self._parse_nalu_header(nalu_data, offset, nalu_length)
                 nalu.is_h265 = True
                 nalus.append(nalu)
                 offset += nalu_length

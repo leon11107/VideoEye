@@ -61,6 +61,14 @@ class MainWindow(QMainWindow):
         self._analysis_finalized = False
         self._refs_pushed = False
 
+        # Hex-view buffer state. The hex viewer shows the current frame's packet
+        # by default; clicking an extradata parameter set swaps it to the
+        # extradata buffer (and a new frame selection swaps it back).
+        self._extradata = b""
+        self._packet_data = b""
+        self._packet_base = 0
+        self._hex_source = "packet"  # "packet" | "extradata"
+
         self._setup_ui()
         self._setup_menus()
         self._setup_toolbar()
@@ -380,6 +388,7 @@ class MainWindow(QMainWindow):
 
         # Stream viewer NALU selection -> hex viewer highlight
         self._stream_viewer.nalu_selected.connect(self._on_nalu_selected)
+        self._stream_viewer.extradata_selected.connect(self._on_extradata_selected)
 
         # Overlay toggles -> decoded view layers
         self._overlay_controls.overlays_changed.connect(
@@ -458,6 +467,7 @@ class MainWindow(QMainWindow):
 
             # Parse extradata for SPS/PPS
             extradata = self._demuxer.get_extradata()
+            self._extradata = extradata or b""
             if extradata:
                 self._stream_viewer.set_extradata(extradata)
 
@@ -618,7 +628,10 @@ class MainWindow(QMainWindow):
         self._stream_viewer.display_frame(frame, packet_data)
         # base_addr = the packet's absolute byte offset in the file, so the
         # hex address column reads as the frame's position in the bitstream.
-        self._hex_viewer.set_data(packet_data, base_addr=frame.pos or 0)
+        self._packet_data = packet_data
+        self._packet_base = frame.pos or 0
+        self._hex_source = "packet"
+        self._hex_viewer.set_data(packet_data, base_addr=self._packet_base)
 
     def _update_ref_markers(self, index: int) -> None:
         """Mark frame `index`'s reference frames on the chart (or clear)."""
@@ -633,8 +646,28 @@ class MainWindow(QMainWindow):
         self._select_frame(index)
 
     def _on_nalu_selected(self, offset: int, size: int):
-        """Handle NALU selection from stream viewer."""
-        self._hex_viewer.set_highlight(offset, offset + size)
+        """Highlight a frame-packet structure (NALU/OBU) in the hex view."""
+        if self._hex_source != "packet":
+            # Restore the packet buffer (we were showing extradata), highlighting
+            # in the same render pass.
+            self._hex_source = "packet"
+            self._hex_viewer.set_data(self._packet_data, offset, offset + size,
+                                      base_addr=self._packet_base)
+        else:
+            self._hex_viewer.set_highlight(offset, offset + size)
+        self._hex_viewer.scroll_to_offset(offset)
+
+    def _on_extradata_selected(self, offset: int, size: int):
+        """Highlight an extradata parameter set / sequence header. The hex view
+        swaps to the extradata buffer (avcC/hvcC/av1C)."""
+        if not self._extradata:
+            return
+        if self._hex_source != "extradata":
+            self._hex_source = "extradata"
+            self._hex_viewer.set_data(self._extradata, offset, offset + size,
+                                      base_addr=0)
+        else:
+            self._hex_viewer.set_highlight(offset, offset + size)
         self._hex_viewer.scroll_to_offset(offset)
 
         # Raise hex viewer dock

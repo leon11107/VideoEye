@@ -18,7 +18,10 @@ class StreamViewer(QWidget):
     """Displays the bitstream structure in a tree view: NAL units for
     H.264/HEVC, OBUs for AV1."""
 
-    nalu_selected = pyqtSignal(int, int)  # (unit_offset, unit_size) -- NALU or OBU
+    nalu_selected = pyqtSignal(int, int)  # (offset, size) within the frame packet
+    # (offset, size) within the container extradata (avcC/hvcC/av1C) -- the
+    # parameter sets / sequence header live there, not in the per-frame packet.
+    extradata_selected = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -180,9 +183,10 @@ class StreamViewer(QWidget):
     def _add_param_sets_item(self) -> None:
         """Show the extradata SPS/PPS/VPS as top-level nodes (they aren't in the
         per-frame packets)."""
-        for nalu, syntax in self._param_sets:
+        for i, (nalu, syntax) in enumerate(self._param_sets):
             item = QTreeWidgetItem(
                 [syntax.get("_name", nalu.type_name), f"{len(nalu.data):,} bytes"])
+            item.setData(0, Qt.ItemDataRole.UserRole, ("extra", i))
             item.setForeground(0, QColor(78, 201, 176))   # teal
             if self._is_h265:
                 self._add_item(item, "nal_unit_type", str(nalu.nal_unit_type))
@@ -209,17 +213,17 @@ class StreamViewer(QWidget):
         inband = [(i, o) for i, o in enumerate(self._obus) if o["type"] == 1]
         if inband:
             for i, o in inband:
-                self._add_av1_seq_item(o, i)
+                self._add_av1_seq_item(o, ("pkt", i))
         else:
-            for o in self._av1_seq_obus:
-                self._add_av1_seq_item(o, None)
+            for si, o in enumerate(self._av1_seq_obus):
+                self._add_av1_seq_item(o, ("extra", si))
 
         for i, obu in enumerate(self._obus):
             if obu["type"] == 1:
                 continue                                 # shown above
             item = QTreeWidgetItem(
                 [obu["syntax"].get("_name", obu["name"]), f"{obu['size']:,} bytes"])
-            item.setData(0, Qt.ItemDataRole.UserRole, i)
+            item.setData(0, Qt.ItemDataRole.UserRole, ("pkt", i))
             item.setExpanded(True)
             if obu["type"] in (3, 6, 7):                 # frame header / frame
                 item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
@@ -227,14 +231,15 @@ class StreamViewer(QWidget):
             self._add_syntax_tree(item, obu["syntax"])
             self._tree.addTopLevelItem(item)
 
-    def _add_av1_seq_item(self, obu: dict, obu_index) -> None:
-        """Top-level sequence_header_obu() node (AV1's SPS analog)."""
+    def _add_av1_seq_item(self, obu: dict, tag: tuple) -> None:
+        """Top-level sequence_header_obu() node (AV1's SPS analog). `tag` is
+        ("pkt", obu_index) for an in-band header or ("extra", seq_index) for one
+        carried in the av1C extradata."""
         item = QTreeWidgetItem(
             [obu["syntax"].get("_name", obu["name"]), f"{obu['size']:,} bytes"])
         item.setForeground(0, QColor(78, 201, 176))      # teal, like SPS/PPS
         item.setExpanded(True)
-        if obu_index is not None:                        # in-band -> clickable
-            item.setData(0, Qt.ItemDataRole.UserRole, obu_index)
+        item.setData(0, Qt.ItemDataRole.UserRole, tag)
         self._add_syntax_tree(item, obu["syntax"])
         self._tree.addTopLevelItem(item)
 
@@ -245,8 +250,8 @@ class StreamViewer(QWidget):
             f"{len(nalu.data):,} bytes"
         ])
 
-        # Store NALU reference for selection
-        item.setData(0, Qt.ItemDataRole.UserRole, index)
+        # Store NALU reference for selection (packet-relative)
+        item.setData(0, Qt.ItemDataRole.UserRole, ("pkt", index))
 
         # Color code by type
         if nalu.is_parameter_set():
@@ -305,28 +310,41 @@ class StreamViewer(QWidget):
         return item
 
     def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """Handle item click to emit NALU selection."""
-        # Find NALU index
-        nalu_index = item.data(0, Qt.ItemDataRole.UserRole)
+        """Map the clicked structure to a byte range in the hex view.
 
-        # Check parent if this item doesn't have NALU index
-        if nalu_index is None:
-            parent = item.parent()
-            while parent:
-                nalu_index = parent.data(0, Qt.ItemDataRole.UserRole)
-                if nalu_index is not None:
-                    break
-                parent = parent.parent()
-
-        if nalu_index is None:
+        The highlight is at top-level-structure granularity: clicking any field
+        walks up to the owning NALU/OBU/parameter-set node, so the whole
+        structure's bytes are highlighted (not the individual field)."""
+        tag = item.data(0, Qt.ItemDataRole.UserRole)
+        node = item
+        while tag is None and node.parent() is not None:
+            node = node.parent()
+            tag = node.data(0, Qt.ItemDataRole.UserRole)
+        if not tag:
             return
-        if self._is_av1:
-            if 0 <= nalu_index < len(self._obus):
-                obu = self._obus[nalu_index]
+
+        source, idx = tag
+        if source == "extra":
+            self._emit_extradata_region(idx)
+        elif self._is_av1:
+            if 0 <= idx < len(self._obus):
+                obu = self._obus[idx]
                 self.nalu_selected.emit(obu["offset"], obu["size"])
-        elif 0 <= nalu_index < len(self._nalus):
-            nalu = self._nalus[nalu_index]
+        elif 0 <= idx < len(self._nalus):
+            nalu = self._nalus[idx]
             self.nalu_selected.emit(nalu.offset, nalu.size)
+
+    def _emit_extradata_region(self, idx: int) -> None:
+        """Emit the byte range of an extradata parameter set / sequence header."""
+        if self._is_av1:
+            if 0 <= idx < len(self._av1_seq_obus):
+                obu = self._av1_seq_obus[idx]
+                # Seq OBU offsets are relative to extradata[4:] (after the
+                # 4-byte av1C config record), so shift back into full extradata.
+                self.extradata_selected.emit(4 + obu["offset"], obu["size"])
+        elif 0 <= idx < len(self._param_sets):
+            nalu = self._param_sets[idx][0]
+            self.extradata_selected.emit(nalu.offset, nalu.size)
 
     def clear(self) -> None:
         """Clear the display."""
