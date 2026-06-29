@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from ..core.frame_info import FrameInfo, FrameType
-from ..core.av1_obu import describe_obus
+from ..parsers.av1_parser import Av1Parser
 from ..theme import current_theme
 from ..parsers.nalu_parser import NALUnit, NALUParser
 from ..parsers.h264_parser import H264Parser
@@ -29,7 +29,8 @@ class StreamViewer(QWidget):
         self._h265_parser = H265Parser()
         self._is_h265 = False
         self._is_av1 = False
-        self._obus: list[dict] = []   # AV1: enumerated OBUs of the current frame
+        self._av1_parser = Av1Parser()
+        self._obus: list[dict] = []   # AV1: parsed OBUs of the current frame
         self._nal_codec = False
         self._setup_ui()
 
@@ -175,8 +176,8 @@ class StreamViewer(QWidget):
         self._tree.addTopLevelItem(frame_item)
 
     def _display_av1(self, frame: FrameInfo, packet_data: bytes) -> None:
-        """Display the AV1 OBU structure for a coded frame (AV1 has no NALUs)."""
-        self._obus = describe_obus(packet_data) if packet_data else []
+        """Display the AV1 OBU syntax tree for a coded frame (AV1 has no NALUs)."""
+        self._obus = self._av1_parser.parse(packet_data) if packet_data else []
 
         kind = "show_existing" if frame.show_existing else (
             "no-show" if frame.show_frame is False else frame.frame_type.value)
@@ -193,21 +194,14 @@ class StreamViewer(QWidget):
         colors = {FrameType.I: QColor(220, 80, 80), FrameType.P: QColor(80, 180, 80)}
         frame_item.setForeground(0, colors.get(frame.frame_type, QColor(150, 150, 150)))
 
-        # AV1 frame-level metadata (already resolved by the demuxer/OBU parser).
+        # AV1 frame-level metadata resolved by the demuxer/decode-order model
+        # (decode + display ordering and references the raw header doesn't give).
         if frame.pts is not None:
             self._add_item(frame_item, "PTS", str(frame.pts))
-        if frame.dts is not None:
-            self._add_item(frame_item, "DTS", str(frame.dts))
         self._add_item(frame_item, "Time", f"{frame.time_seconds:.3f}s")
         self._add_item(frame_item, "decode_index", str(frame.index))
         if frame.display_index is not None:
             self._add_item(frame_item, "display_index", str(frame.display_index))
-        if frame.order_hint is not None:
-            self._add_item(frame_item, "order_hint", str(frame.order_hint))
-        self._add_item(frame_item, "show_frame",
-                       "-" if frame.show_frame is None else str(bool(frame.show_frame)))
-        self._add_item(frame_item, "show_existing_frame", str(bool(frame.show_existing)))
-        self._add_item(frame_item, "keyframe", "Yes" if frame.is_keyframe else "No")
         if frame.av1_sb_size:
             self._add_item(frame_item, "superblock",
                            f"{frame.av1_sb_size}x{frame.av1_sb_size}")
@@ -216,21 +210,22 @@ class StreamViewer(QWidget):
                              (frame.av1_ref_l0 or []) + (frame.av1_ref_l1 or []))
             self._add_item(frame_item, "references (decode idx)", refs)
 
-        # One node per OBU; clicking highlights its bytes in the hex viewer.
+        # One node per OBU with its full parsed syntax tree; clicking any node
+        # highlights the OBU's bytes in the hex viewer.
         for i, obu in enumerate(self._obus):
+            label = obu["syntax"].get("_name", obu["name"])
             obu_item = QTreeWidgetItem([
-                f"OBU {i}: {obu['name']}", f"{obu['size']:,} bytes"
+                f"OBU {i}: {label}", f"{obu['size']:,} bytes"
             ])
             obu_item.setData(0, Qt.ItemDataRole.UserRole, i)
+            obu_item.setExpanded(True)
             t = obu["type"]
             if t == 1:                                   # sequence header
                 obu_item.setForeground(0, QColor(78, 201, 176))
-            elif t in (3, 6):                            # frame header / frame
+            elif t in (3, 6, 7):                         # frame header / frame
                 obu_item.setForeground(0, QColor(220, 80, 80) if frame.is_keyframe
                                        else QColor(156, 220, 254))
-            self._add_item(obu_item, "obu_type", f"{t} ({obu['name']})")
-            self._add_item(obu_item, "obu_offset", str(obu["offset"]))
-            self._add_item(obu_item, "has_size_field", str(bool(obu["has_size"])))
+            self._add_syntax_tree(obu_item, obu["syntax"])
             frame_item.addChild(obu_item)
 
         self._tree.addTopLevelItem(frame_item)
