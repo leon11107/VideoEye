@@ -18,12 +18,13 @@ from .overlay import (
 )
 from ..theme import current_theme
 
-# Always-on hover inspection overlay: reveal the region's CU/PU/TU partition,
-# block type and MVs regardless of the overlay toggles. Intra-mode glyphs are
-# intentionally excluded -- hover shows partition / type / MV only.
+# Always-on hover inspection overlay: reveal the region's CU partition, block
+# type and MVs regardless of the overlay toggles. PU/TU sub-partitions and
+# intra-mode glyphs are intentionally excluded -- hover shows the CU partition
+# / type / MV only (the finer PU/TU splits are available via the toolbar
+# Partition overlay when wanted).
 _HOVER_FLAGS = {
-    "partition": True, "part_pu": True,
-    "part_tu_luma": True, "part_tu_chroma": True,
+    "partition": True,
     "mode": True, "mode_inter": True,
 }
 
