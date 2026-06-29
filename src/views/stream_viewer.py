@@ -100,8 +100,22 @@ class StreamViewer(QWidget):
         ) if self._nal_codec else None
 
     def set_extradata(self, extradata: bytes) -> None:
-        """Parse extradata (SPS/PPS from container) to populate parameter sets."""
-        if not extradata or not self._nalu_parser:
+        """Parse container extradata to populate parameter sets / sequence state.
+
+        H.264/HEVC: SPS/PPS from avcC/hvcC. AV1: the av1C record's configOBUs
+        carry the sequence header, so seeding it lets frame headers parse even
+        when a non-keyframe is viewed before any sequence-header-bearing frame.
+        """
+        if not extradata:
+            return
+
+        if self._is_av1:
+            # av1C = 4-byte AV1CodecConfigurationRecord then configOBUs.
+            if len(extradata) > 4:
+                self._av1_parser.parse(extradata[4:])
+            return
+
+        if not self._nalu_parser:
             return
 
         if self._is_h265:
