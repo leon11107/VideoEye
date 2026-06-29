@@ -31,6 +31,10 @@ class StreamViewer(QWidget):
         self._is_av1 = False
         self._av1_parser = Av1Parser()
         self._obus: list[dict] = []   # AV1: parsed OBUs of the current frame
+        # H.264/HEVC parameter sets parsed from the container extradata
+        # (avcC/hvcC), shown at the top of every frame since they aren't in the
+        # per-frame packets. Each entry is (nalu, parsed_syntax).
+        self._param_sets: list[tuple] = []
         self._nal_codec = False
         self._setup_ui()
 
@@ -93,6 +97,7 @@ class StreamViewer(QWidget):
         # (AV1 OBUs, etc.) must not be parsed as NAL or frame-type classification
         # reads garbage (e.g. AV1 P-frames misdetected as I).
         self._nal_codec = cn in ('h264', 'avc', 'h.264', 'hevc', 'h265', 'h.265')
+        self._param_sets = []
         self._nalu_parser = NALUParser(
             is_h265=self._is_h265,
             is_avc=is_avc,
@@ -120,12 +125,12 @@ class StreamViewer(QWidget):
 
         if self._is_h265:
             nalus = self._nalu_parser.parse_extradata_h265(extradata)
-            for nalu in nalus:
-                self._h265_parser.parse_nalu(nalu)
+            parser = self._h265_parser
         else:
             nalus = self._nalu_parser.parse_extradata_h264(extradata)
-            for nalu in nalus:
-                self._h264_parser.parse_nalu(nalu)
+            parser = self._h264_parser
+        # Parse (populates parser context) and keep them for display.
+        self._param_sets = [(nalu, parser.parse_nalu(nalu)) for nalu in nalus]
 
     def display_frame(self, frame: FrameInfo, packet_data: bytes = b"") -> None:
         """Display the frame's bitstream structure: NAL units for H.264/HEVC,
@@ -187,7 +192,33 @@ class StreamViewer(QWidget):
             nalu_item = self._create_nalu_item(i, nalu)
             frame_item.addChild(nalu_item)
 
+        # Parameter sets (SPS/PPS/VPS) live in the avcC/hvcC extradata, not the
+        # per-frame packets, so surface them at the top of the tree.
+        self._add_param_sets_item()
         self._tree.addTopLevelItem(frame_item)
+
+    def _add_param_sets_item(self) -> None:
+        """Top-level node showing the extradata SPS/PPS/VPS for the stream."""
+        if not self._param_sets:
+            return
+        ps_item = QTreeWidgetItem(
+            ["Parameter Sets (from extradata)",
+             f"{len(self._param_sets)} NAL units"])
+        ps_item.setExpanded(True)
+        ps_item.setForeground(0, QColor(78, 201, 176))    # teal
+        for nalu, syntax in self._param_sets:
+            child = QTreeWidgetItem(
+                [syntax.get("_name", nalu.type_name), f"{len(nalu.data):,} bytes"])
+            child.setForeground(0, QColor(78, 201, 176))
+            # nal header fields, then the parsed syntax tree.
+            if self._is_h265:
+                self._add_item(child, "nal_unit_type", str(nalu.nal_unit_type))
+            else:
+                self._add_item(child, "nal_ref_idc", str(nalu.nal_ref_idc))
+                self._add_item(child, "nal_unit_type", str(nalu.nal_unit_type))
+            self._add_syntax_tree(child, syntax)
+            ps_item.addChild(child)
+        self._tree.addTopLevelItem(ps_item)
 
     def _display_av1(self, frame: FrameInfo, packet_data: bytes) -> None:
         """Display the AV1 OBU syntax tree for a coded frame (AV1 has no NALUs)."""
@@ -340,6 +371,7 @@ class StreamViewer(QWidget):
         self._current_frame = None
         self._nalus = []
         self._obus = []
+        self._param_sets = []
         self._info_label.setText("No frame selected")
 
     def get_frame_type_from_nalus(self, packet_data: bytes) -> FrameType:

@@ -529,10 +529,15 @@ class Demuxer:
         if codec_ctx and codec_ctx.extradata:
             extradata = bytes(codec_ctx.extradata)
             if info.codec_name in ('h264', 'hevc') and len(extradata) > 0:
-                if extradata[0] == 1:  # AVCDecoderConfigurationRecord
+                if extradata[0] == 1:  # AVC/HEVC DecoderConfigurationRecord
                     info.is_avc = True
-                    if len(extradata) > 4:
-                        info.nal_length_size = (extradata[4] & 0x03) + 1
+                    # lengthSizeMinusOne sits at different offsets: byte 4 in
+                    # avcC, byte 21 in hvcC (the structures differ). Using the
+                    # avcC offset for HEVC yields a wrong size and shreds the NAL
+                    # split into hundreds of bogus units.
+                    off = 21 if info.codec_name == 'hevc' else 4
+                    if len(extradata) > off:
+                        info.nal_length_size = (extradata[off] & 0x03) + 1
 
         self._stream_info = info
 
