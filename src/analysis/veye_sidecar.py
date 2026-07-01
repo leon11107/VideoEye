@@ -1163,27 +1163,35 @@ def ctu_bit_sizes_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     return out
 
 
-def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
-    """HEVC slice boundary segments [x1,y1,x2,y2] (px): the CTB edges where the
-    slice id changes between neighbours. Returns an (N,4) int32 array."""
-    sg = fb.slice_grid
-    cs = fb.ctb_size
-    if sg is None or cs <= 0:
-        return np.empty((0, 4), dtype=np.int32)
-    ch, cw = sg.shape
+def _slice_lines_from_grid(grid: np.ndarray, unit: int) -> np.ndarray:
+    """Boundary segments [x1,y1,x2,y2] (px) at block edges where the slice id
+    changes between neighbours, for a (rows, cols) per-block slice-id grid whose
+    cells are `unit` px. The per-cell edge test yields the exact staircase when a
+    slice starts mid-row."""
+    ch, cw = grid.shape
     out: list[tuple] = []
     for cy in range(ch):
         for cx in range(cw):
-            sid = int(sg[cy, cx])
+            sid = int(grid[cy, cx])
             if sid < 0:
                 continue
-            if cx > 0 and int(sg[cy, cx - 1]) != sid:  # left edge
-                x = cx * cs
-                out.append((x, cy * cs, x, (cy + 1) * cs))
-            if cy > 0 and int(sg[cy - 1, cx]) != sid:  # top edge
-                y = cy * cs
-                out.append((cx * cs, y, (cx + 1) * cs, y))
+            if cx > 0 and int(grid[cy, cx - 1]) != sid:  # left edge
+                x = cx * unit
+                out.append((x, cy * unit, x, (cy + 1) * unit))
+            if cy > 0 and int(grid[cy - 1, cx]) != sid:  # top edge
+                y = cy * unit
+                out.append((cx * unit, y, (cx + 1) * unit, y))
     return np.array(out, dtype=np.int32) if out else np.empty((0, 4), np.int32)
+
+
+def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """Slice boundary segments [x1,y1,x2,y2] (px). HEVC uses the per-CTB
+    slice_grid; H.264 the per-MB mb_slice_id (16px cells). Returns (N,4) int32."""
+    if fb.slice_grid is not None and fb.ctb_size > 0:
+        return _slice_lines_from_grid(fb.slice_grid, fb.ctb_size)
+    if fb.mb_slice_id is not None:
+        return _slice_lines_from_grid(fb.mb_slice_id, 16)
+    return np.empty((0, 4), dtype=np.int32)
 
 
 def tile_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:

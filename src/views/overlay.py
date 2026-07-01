@@ -217,8 +217,8 @@ def _draw_lines(painter: QPainter, lines, color: QColor, width: int) -> None:
 
 
 def render_slice_boundaries(painter: QPainter, analysis: FrameAnalysis) -> None:
-    """HEVC slice boundaries (thick orange lines between CTBs of different
-    slices). No-op for codecs/streams without slice-structure data."""
+    """Slice boundaries (thick orange lines between blocks of different slices):
+    HEVC per-CTB, H.264 per-MB. No-op for codecs/streams without slice data."""
     _draw_lines(painter, analysis.slice_lines, QColor(255, 150, 30), 3)
 
 
@@ -379,7 +379,7 @@ def render_mode(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None
 
 
 def render_boundary(painter: QPainter, analysis: FrameAnalysis, flags: dict) -> None:
-    """Boundary group: HEVC slice and tile partition boundaries."""
+    """Boundary group: H.264/HEVC slice boundaries and HEVC tile boundaries."""
     if not flags.get("boundary"):
         return
     if flags.get("bnd_slice"):
