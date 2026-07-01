@@ -43,11 +43,15 @@ ffmpeg -loglevel error -y -f lavfi -i "testsrc2=size=${W}x${H}:rate=${FPS}" \
   -frames:v "$N" -pix_fmt yuv420p "$TMP/in.yuv"
 
 jm() {  # jm <out.mp4> <SliceArgument>
+  # NumberBFrames=0: muxing raw Annex-B .264 that has B-frames via `-c:v copy`
+  # yields broken pts/dts and ffmpeg then drops the last frame (8 packets -> 7
+  # decoded), leaving a phantom last frame with no picture/sidecar. IPPP avoids
+  # the reordering entirely; slices are per-frame regardless of frame type.
   local out="$1" arg="$2"
   ( cd "$TMP" && "$LENCOD" -d "$JMCFG" -p InputFile="$TMP/in.yuv" \
       -p SourceWidth=$W -p SourceHeight=$H -p FramesToBeEncoded=$N -p FrameRate=$FPS \
       -p OutputFile="$TMP/jm.264" -p ReconFile="$TMP/jm_rec.yuv" -p OutFileMode=0 \
-      -p SliceMode=1 -p SliceArgument=$arg >"$TMP/jm.log" 2>&1 )
+      -p NumberBFrames=0 -p SliceMode=1 -p SliceArgument=$arg >"$TMP/jm.log" 2>&1 )
   ffmpeg -loglevel error -y -i "$TMP/jm.264" -c:v copy "$out"
 }
 hm() {  # hm <out.mp4> <extra HM args...>
