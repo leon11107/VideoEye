@@ -645,25 +645,42 @@ class Demuxer:
         from .av1_obu import (split_temporal_unit, assign_display_ranks,
                               KEY_FRAME, INTRA_ONLY_FRAME)
 
+        from ..parsers.av1_parser import Av1Parser
+
         # Pass 1: split every packet into its coded frames (decode order),
-        # remembering each coded frame's parent packet metadata.
+        # remembering each coded frame's parent packet metadata. A separate
+        # full-header parser (seeded with the av1C sequence header) yields each
+        # frame's tile boundaries for the boundary overlay -- the shallow OBU
+        # splitter above stops at order_hint, well before tile_info.
+        av1p = Av1Parser()
+        extradata = bytes(self._video_stream.codec_context.extradata or b"")
+        if len(extradata) > 4:
+            try:
+                av1p.parse(extradata[4:])   # seed sequence header from av1C
+            except Exception:
+                pass
         seq = None
         packet_index = -1
-        flat = []                 # (Av1CodedFrame, packet_index, pts, dts, pos, dur)
+        flat = []                 # (Av1CodedFrame, packet_index, pts, dts, pos, dur, tile_bd)
         for packet in self._container.demux(stream):
             if packet.size == 0:
                 continue
             packet_index += 1
+            pkt_bytes = bytes(packet)
             try:
-                coded, seq = split_temporal_unit(bytes(packet), seq)
+                coded, seq = split_temporal_unit(pkt_bytes, seq)
             except Exception as e:
                 print(f"AV1 OBU split failed at packet {packet_index}: {e}")
                 coded = []
             ppos = (packet.pos if packet.pos is not None and packet.pos >= 0
                     else None)
             for cf in coded:
+                try:
+                    tbd = av1p.tile_boundaries(pkt_bytes[cf.byte_off:cf.byte_off + cf.size])
+                except Exception:
+                    tbd = None
                 flat.append((cf, packet_index, packet.pts, packet.dts, ppos,
-                             packet.duration))
+                             packet.duration, tbd))
             if progress_cb is not None and (len(flat) & 0x3F) == 0:
                 progress_cb("index", len(flat), total_est)
 
@@ -676,7 +693,7 @@ class Demuxer:
         keyframe_count = 0
         max_bitrate = 0
         total_bytes = 0
-        for frame_index, (cf, ppkt, pts, dts, ppos, dur) in enumerate(flat):
+        for frame_index, (cf, ppkt, pts, dts, ppos, dur, tbd) in enumerate(flat):
             is_key = cf.frame_type == KEY_FRAME
             if is_key:
                 keyframe_count += 1
@@ -691,6 +708,8 @@ class Demuxer:
                 show_existing=cf.show_existing, display_index=cf.display_rank,
                 av1_ref_l0=cf.ref_decode_l0, av1_ref_l1=cf.ref_decode_l1,
                 av1_sb_size=sb_size,
+                av1_tile_cols=(tbd[0] if tbd else None),
+                av1_tile_rows=(tbd[1] if tbd else None),
             )
             if fps > 0:
                 frame.instant_bitrate = int(cf.size * 8 * fps)

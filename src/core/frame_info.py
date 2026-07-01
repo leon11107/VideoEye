@@ -59,6 +59,10 @@ class FrameInfo:
     av1_ref_l1: Optional[list] = None
     # AV1 superblock size in px (64 or 128); stream-constant. None for non-AV1.
     av1_sb_size: Optional[int] = None
+    # AV1 tile column / row pixel boundaries [0, ..., frame_edge], from the
+    # frame's tile_info (the boundary overlay). None if not parsed / no tiles.
+    av1_tile_cols: Optional[tuple] = None
+    av1_tile_rows: Optional[tuple] = None
 
     def __str__(self) -> str:
         return (f"Frame {self.index}: {self.frame_type.value}-frame, "

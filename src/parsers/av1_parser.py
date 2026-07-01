@@ -138,6 +138,34 @@ class Av1Parser:
         if seq is not None:
             self._seq = seq
 
+    @staticmethod
+    def _find_tile_info(d: dict):
+        """Depth-first search for a tile_info() sub-dict in a syntax tree."""
+        for k, v in d.items():
+            if k == "tile_info()" and isinstance(v, dict):
+                return v
+            if isinstance(v, dict):
+                r = Av1Parser._find_tile_info(v)
+                if r is not None:
+                    return r
+        return None
+
+    def tile_boundaries(self, buf: bytes):
+        """Tile column/row pixel boundaries [0, ..., frame_edge] of the frame in
+        `buf`, as (cols, rows) tuples, or None if it carries no tile_info (e.g. a
+        show_existing frame). Maintains sequence-header state across calls, so
+        feed a stream's coded frames in decode order."""
+        try:
+            obus = self.parse(buf)
+        except Exception:
+            return None
+        for o in obus:
+            ti = self._find_tile_info(o.get("syntax", {}))
+            if ti is not None:
+                return (tuple(ti.get("_tile_col_bd", ())),
+                        tuple(ti.get("_tile_row_bd", ())))
+        return None
+
     def parse(self, buf: bytes) -> list:
         """Parse all OBUs in buf. Returns a list of dicts:
         {type, name, offset, size, syntax} where syntax is the rendered tree."""
@@ -645,6 +673,8 @@ class Av1Parser:
         min_log2_tiles = max(min_log2_tile_cols,
                              _tile_log2(max_tile_area_sb, sb_rows * sb_cols))
 
+        col_starts_sb: list[int] = []   # non-uniform: tile left edges (superblocks)
+        row_starts_sb: list[int] = []
         uniform = r.f(1)
         ti["uniform_tile_spacing_flag"] = uniform
         if uniform:
@@ -672,6 +702,7 @@ class Av1Parser:
             start = 0
             i = 0
             while start < sb_cols:
+                col_starts_sb.append(start)
                 w = r.ns(min(max_tile_width_sb, sb_cols - start)) + 1
                 ti[f"width_in_sbs_minus_1[{i}]"] = w - 1
                 widest = max(widest, w)
@@ -684,6 +715,7 @@ class Av1Parser:
             start = 0
             i = 0
             while start < sb_rows:
+                row_starts_sb.append(start)
                 h = r.ns(min(max_tile_height_sb, sb_rows - start)) + 1
                 ti[f"height_in_sbs_minus_1[{i}]"] = h - 1
                 start += h
@@ -692,6 +724,19 @@ class Av1Parser:
         if cols_log2 > 0 or rows_log2 > 0:
             ti["context_update_tile_id"] = r.f(rows_log2 + cols_log2)
             ti["tile_size_bytes_minus_1"] = r.f(2)
+
+        # Derived pixel tile boundaries [0, ..., frame_edge] for the boundary
+        # overlay (uniform tiling splits evenly by superblocks; non-uniform uses
+        # the collected per-tile widths). `_`-prefixed -> skipped in display.
+        sb_px = 1 << sb_size
+        if uniform:
+            tw = (sb_cols + (1 << cols_log2) - 1) >> cols_log2
+            th = (sb_rows + (1 << rows_log2) - 1) >> rows_log2
+            col_starts_sb = list(range(0, sb_cols, max(tw, 1)))
+            row_starts_sb = list(range(0, sb_rows, max(th, 1)))
+        fw, fh = self._frame_width, self._frame_height
+        ti["_tile_col_bd"] = [min(c * sb_px, fw) for c in col_starts_sb] + [fw]
+        ti["_tile_row_bd"] = [min(c * sb_px, fh) for c in row_starts_sb] + [fh]
         s["tile_info()"] = ti
 
     def _read_delta_q(self, r: _Reader, parent: dict, name: str) -> int:

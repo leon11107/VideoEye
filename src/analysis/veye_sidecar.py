@@ -1194,26 +1194,24 @@ def slice_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
     return np.empty((0, 4), dtype=np.int32)
 
 
-def tile_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
-    """HEVC tile boundary segments [x1,y1,x2,y2] (px): internal tile column /
-    row boundaries spanning the picture. Returns an (N,4) int32 array."""
-    cbd = fb.tile_col_bd
-    rbd = fb.tile_row_bd
-    cs = fb.ctb_size
-    if (len(cbd) <= 2 and len(rbd) <= 2):
+def tile_lines_from_bounds(col_bd, row_bd) -> np.ndarray:
+    """Internal tile boundary segments [x1,y1,x2,y2] (px) from column/row pixel
+    boundary lists [0, ..., frame_edge]: a full-height vertical line at each
+    internal column boundary and a full-width horizontal line at each internal
+    row boundary. Returns an (N,4) int32 array (empty for a single tile). Used by
+    both HEVC (sidecar tile_col_bd/tile_row_bd) and AV1 (bitstream tile_info)."""
+    if len(col_bd) <= 2 and len(row_bd) <= 2:
         return np.empty((0, 4), dtype=np.int32)  # single tile: no internal bds
-    if fb.slice_grid is not None and cs > 0:
-        ch, cw = fb.slice_grid.shape
-        w, h = cw * cs, ch * cs
-    else:
-        w = cbd[-1] if cbd else 0
-        h = rbd[-1] if rbd else 0
-    out: list[tuple] = []
-    for x in cbd[1:-1]:               # internal vertical boundaries
-        out.append((int(x), 0, int(x), int(h)))
-    for y in rbd[1:-1]:               # internal horizontal boundaries
-        out.append((0, int(y), int(w), int(y)))
+    w = int(col_bd[-1]) if len(col_bd) else 0
+    h = int(row_bd[-1]) if len(row_bd) else 0
+    out = [(int(x), 0, int(x), h) for x in col_bd[1:-1]]        # vertical
+    out += [(0, int(y), w, int(y)) for y in row_bd[1:-1]]       # horizontal
     return np.array(out, dtype=np.int32) if out else np.empty((0, 4), np.int32)
+
+
+def tile_lines_from_frame(fb: VeyeFrameBlocks) -> np.ndarray:
+    """HEVC tile boundary segments from the sidecar's tile column/row bounds."""
+    return tile_lines_from_bounds(fb.tile_col_bd, fb.tile_row_bd)
 
 
 def qp_grid_from_frame(fb: VeyeFrameBlocks) -> Optional[np.ndarray]:

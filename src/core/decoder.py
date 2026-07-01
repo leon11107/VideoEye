@@ -10,6 +10,7 @@ import numpy as np
 from .frame_info import FrameInfo
 from ..analysis import FrameAnalysis, create_extractor
 from ..analysis.block_sidecar import BlockSidecar
+from ..analysis.veye_sidecar import tile_lines_from_bounds
 
 # PyAV format names for raw elementary streams (no container index, repeated
 # parameter sets at each IDR) that support byte-offset random seek.
@@ -149,6 +150,7 @@ class Decoder:
         # decode index -> (l0, l1) references resolved from the bitstream.
         self._av1_refs: dict[int, tuple] = {}
         self._av1_sb_size = 64          # superblock px (64/128), stream-constant
+        self._av1_tile_bd: dict = {}    # decode index -> (col_bd, row_bd) px
         # Raw elementary stream (Annex-B / OBU)? These have no container index
         # and cannot be seeked, so we reach keyframes by byte offset instead
         # of re-parsing from the start on every jump.
@@ -344,7 +346,14 @@ class Decoder:
             if "slice" in want and analysis.slice_lines is None:
                 analysis.slice_lines = self._block_sidecar.slice_lines_for(sc_index)
             if "tile" in want and analysis.tile_lines is None:
-                analysis.tile_lines = self._block_sidecar.tile_lines_for(sc_index)
+                if self._av1_mode:
+                    # AV1 tiles come from the bitstream (tile_info), not the
+                    # sidecar; keyed by decode index.
+                    bd = self._av1_tile_bd.get(frame_index)
+                    if bd is not None and bd[0] is not None:
+                        analysis.tile_lines = tile_lines_from_bounds(bd[0], bd[1])
+                else:
+                    analysis.tile_lines = self._block_sidecar.tile_lines_for(sc_index)
             if "mvs" in want and analysis.mvs is None:
                 analysis.mvs = self._block_sidecar.mvs_for(sc_index)
             if "qp" in want and analysis.qp_grid is None:
@@ -827,6 +836,13 @@ class Decoder:
             }
             self._av1_sb_size = next(
                 (f.av1_sb_size for f in frames if f.av1_sb_size), 64)
+            # Per-frame tile column/row pixel bounds (bitstream tile_info), keyed
+            # by decode index, for the tile boundary overlay (AV1 tiles aren't in
+            # the sidecar). Absent for show_existing / single-tile frames.
+            self._av1_tile_bd = {
+                f.index: (f.av1_tile_cols, f.av1_tile_rows) for f in frames
+                if f.av1_tile_cols is not None
+            }
             self._display_to_index = None
             self._pts_to_index = {}
             self._emit_order = None
